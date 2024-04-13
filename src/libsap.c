@@ -2,12 +2,16 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 
 #include <fcntl.h>
+#include <limits.h>
 #include <netdb.h>
 #include <netinet/in.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/epoll.h>
+#include <sys/signalfd.h>
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <threads.h>
@@ -18,6 +22,7 @@
 #include <arpa/inet.h> // inet_ntop()
 
 #include "libsap.h"
+#include "times.h"
 
 #ifdef __STDC_NO_THREADS__
 #error I need threads to build this program!
@@ -511,7 +516,7 @@ int sap_init(struct sap_ctx *sap_ctx,
 
 	ctx.thread_state.tid = NULL;
 	ctx.thread_state.tid_store = 0;
-	cnd_init(&ctx.thread_state.cnd);
+//	cnd_init(&ctx.thread_state.cnd);
 
 	if (!payload_type)
 		payload_type = SAP_PAYLOAD_TYPE_SDP;
@@ -550,7 +555,6 @@ int sap_init(struct sap_ctx *sap_ctx,
 
 void sap_free(struct sap_ctx *ctx)
 {
-	sap_stop(ctx);
 	close(ctx->sd);
 	free(ctx->message);
 }
@@ -574,6 +578,25 @@ static unsigned int sap_get_interval(struct sap_ctx *ctx)
 	return interval + offset;
 }
 
+/*static int sap_get_next_timeout(struct sap_ctx *ctx)
+{
+	unsigned int interval = sap_get_interval(ctx);
+	struct timespec now, add, next;
+	int64_t diff;
+
+	clock_gettime(CLOCK_MONOTONIC, &now);
+
+	add.tv_sec = interval / 1000;
+	add.tv_nsec = (interval % 1000) * (1000*1000);
+	next = timespec_sum(request_time_cache[rtcidx], add);
+
+	diff = timespec_diffus(now, next) / 1000;
+	if (diff < 0)
+		return 0;
+
+	return (diff > INT_MAX) ? INT_MAX : (int)diff;
+}*/
+
 //#define MAX_EVENTS 32
 
 static void sap_set_msg_type(struct sap_ctx *ctx, int msg_type)
@@ -588,10 +611,15 @@ static void sap_set_msg_type(struct sap_ctx *ctx, int msg_type)
 		packet->flags &= ~BIT(2);
 }
 
-void sap_msleep(struct sap_ctx *ctx, unsigned int msecs)
+/*void sap_msleep(struct sap_ctx *ctx, unsigned int msecs)
 {
 	usleep(msecs * 1000);
-}
+}*/
+
+#define MAX_EVENTS 32
+
+static struct epoll_event events[MAX_EVENTS];
+static int epoll_fd;
 
 int sap_run(struct sap_ctx *ctx)
 {
@@ -599,8 +627,14 @@ int sap_run(struct sap_ctx *ctx)
 //	static struct epoll_event events[MAX_EVENTS];
 //	static int epoll_fd;
 
-	unsigned int timeout;
+	int sfd, timeout, ev_count = 0;
 //	int epoll_fd = epoll_create1(0);
+
+	epoll_fd = epoll_create1(0);
+
+	ret = pipe(ctx->thread_state.pipefd);
+	if (ret < 0)
+		exit(5);
 
 	/* Without an explicit interval and with a specific
 	 * message type we will just send a single one-shot
@@ -614,17 +648,57 @@ int sap_run(struct sap_ctx *ctx)
 	printf("~~~ %s:%i: here1\n", __func__, __LINE__);
 //	timeout = sap_get_interval(ctx);
 
+/*	sigset_t mask, old_mask;
+	sigemptyset(&mask);
+	sigaddset(&mask, SIGINT);
+	sigaddset(&mask, SIGHUP);
+	sigaddset(&mask, SIGTERM);*/
+
+//	ret = pthread_sigmask(SIG_UNBLOCK, &mask, &old_mask);
+/*	ret = pthread_sigmask(SIG_SETMASK, &mask, &old_mask);
+	if (ret != 0) {
+	printf("~~~ %s:%i: pthread_sigmask() returned an error: %i\n", __func__, __LINE__, ret);
+		exit(4);
+	}*/
+
+/*	sfd = signalfd(-1, &mask, 0);
+	if (sfd == -1)
+		exit(2);
+
+	printf("~~~ %s:%i: signalfd(): ret: %i\n", __func__, __LINE__, sfd);*/
+
+	struct epoll_event event;
+	memset(&event, 0, sizeof(event));
+	event.events = EPOLLIN;
+	event.data.fd = ctx->thread_state.pipefd[0];
+
+	if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, event.data.fd, &event))
+		exit(3);
+
+
 	while(!ctx->term) {
 //		epoll_wait(epoll_fd, events, MAX_EVENTS, timeout)
 
 		timeout = sap_get_interval(ctx);
 
-		sap_msleep(ctx, timeout);
+		printf("~~~ %s:%i: calling: epoll_wait(), timeout: %i  (ctx->term: %i)\n", __func__, __LINE__, timeout, ctx->term);
+//		sap_msleep(ctx, timeout);
+		ev_count = epoll_wait(epoll_fd, events, MAX_EVENTS, timeout);
+//		ev_count = epoll_pwait(epoll_fd, events, MAX_EVENTS, timeout, &mask);
+//		ev_count = epoll_pwait(epoll_fd, events, MAX_EVENTS, timeout, NULL);
+
+		printf("~~~ %s:%i: epoll_wait() returned, ev_count: %i (ctx->term: %i)\n", __func__, __LINE__, ev_count, ctx->term);
+		for(int i = 0; i < ev_count; i++) {
+			printf("~~~ %s:%i: epoll_wait(), ev: %i, fd: %i (ctx->term: %i)\n", __func__, __LINE__, i, events[i].data.fd, ctx->term);
+//			events[i].data.fd
+		}
 
 	printf("~~~ %s:%i: here1, %u\n", __func__, __LINE__, timeout);
 		ret = sap_send(ctx);
-		if (ret < 0)
+		if (ret < 0) {
+	printf("~~~ %s:%i: getting out after sap_send()\n", __func__, __LINE__);
 			goto out;
+		}
 
 //		sleep(sap_get_interval(ctx));
 	}
@@ -661,9 +735,31 @@ int sap_start(struct sap_ctx *ctx)
 	thrd_t tid;
 	int ret;
 
+	sigset_t mask, old_mask;
+	sigemptyset(&mask);
+	sigaddset(&mask, SIGINT);
+	sigaddset(&mask, SIGHUP);
+	sigaddset(&mask, SIGTERM);
+	//sigaddset(&mask, SIGQUIT);
+	//
+	if (pthread_sigmask(SIG_BLOCK, &mask, &old_mask) == -1)
+//	if (sigprocmask(SIG_BLOCK, &mask, &old_mask) == -1)
+//	if (sigprocmask(SIG_SETMASK, &mask, &old_mask) == -1)
+		//err(EXIT_FAILURE, "sigprocmask");
+		exit(1);
+
+//	for (int i = 0; i < _NSIG_WORDS; i++)
+//		printf("~~~ %s:%i: mask[%i]: %lu\n", i, old_mask.sig[i]);
+//	for (int i = 0; i < _SIGSET_NWORDS; i++)
+//		printf("~~~ %s:%i: old_mask[%i]: %lu, new_mask[%i]\n", __func__, __LINE__, i, old_mask.__val[i], mask.__val[i]);
+
 	ret = thrd_create(&tid, sap_run_thread, ctx);
 	if (ret != thrd_success)
 		return -EPERM;
+
+//	pthread_sigmask(SIG_SETMASK, &old_mask, NULL);
+	pthread_sigmask(SIG_UNBLOCK, &mask, NULL);
+//	sigprocmask(SIG_SETMASK, &old_mask, NULL);
 
 	ctx->thread_state.tid_store = tid;
 	ctx->thread_state.tid = &ctx->thread_state.tid_store;
@@ -671,12 +767,43 @@ int sap_start(struct sap_ctx *ctx)
 	return 0;
 }
 
+void sap_term(struct sap_ctx *ctx)
+{
+/*	sigset_t mask, old_mask;
+	sigemptyset(&mask);
+	sigaddset(&mask, SIGINT);
+	sigaddset(&mask, SIGHUP);
+	sigaddset(&mask, SIGTERM);
+	//sigaddset(&mask, SIGQUIT);
+	//
+	pthread_sigmask(SIG_BLOCK, &mask, &old_mask);*/
+
+
+	printf("~~~ %s:%i: start\n", __func__, __LINE__);
+	ctx->term = 1;
+	char c = '\0';
+	write(ctx->thread_state.pipefd[1], &c, sizeof(c));
+//	pthread_kill(*ctx->thread_state.tid, SIGINT);
+
+//	pthread_sigmask(SIG_UNBLOCK, &mask, &old_mask);
+
+//	pthread_kill(*ctx->thread_state.tid, SIGHUP);
+	printf("~~~ %s:%i: term = 1 set\n", __func__, __LINE__);
+}
+
 void sap_stop(struct sap_ctx *ctx)
 {
-	ctx->term = 1;
+	printf("~~~ %s:%i: start\n", __func__, __LINE__);
 
 	if (ctx->thread_state.tid) {
+//	pthread_kill(*ctx->thread_state.tid, SIGINT);
+//	pthread_kill(*ctx->thread_state.tid, SIGHUP);
+//	pthread_kill(*ctx->thread_state.tid, SIGTERM);
+
+
+	printf("~~~ %s:%i: calling thrd_join()\n", __func__, __LINE__);
 		thrd_join(*ctx->thread_state.tid, NULL);
+	printf("~~~ %s:%i: thrd_join() returned\n", __func__, __LINE__);
 		ctx->thread_state.tid = NULL;
 		ctx->thread_state.tid_store = 0;
 	}

@@ -19,7 +19,8 @@ static int term = 0;
 void signal_handler_shutdown(int signum)
 {
 	printf("~~~ %s:%i: start\n", __func__, __LINE__);
-	sap_stop(p_sap_ctx);
+	//sap_stop(p_sap_ctx);
+	sap_term(p_sap_ctx);
 }
 
 void setup_signal_handler(struct sap_ctx *ctx)
@@ -186,15 +187,19 @@ int main(int argc, char *argv[])
 
 	setup_signal_handler(&ctx);
 
-	sap_run(&ctx);
-/*	printf("~~~ %s:%i: starting thread\n", __func__, __LINE__);
+//	sap_run(&ctx);
+	printf("~~~ %s:%i: starting thread\n", __func__, __LINE__);
 	sap_start(&ctx);
 	printf("~~~ %s:%i: waiting 15 seconds\n", __func__, __LINE__);
 	sleep(15);
-	printf("~~~ %s:%i: stopping+freeing thread\n", __func__, __LINE__);*/
+	printf("~~~ %s:%i: stopping thread\n", __func__, __LINE__);
+	sap_stop(&ctx);
+	printf("~~~ %s:%i: freeing thread\n", __func__, __LINE__);
 
 	sap_free(&ctx);
 	printf("~~~ %s:%i: free'd thread, returning\n", __func__, __LINE__);
+	sleep(10);
+	printf("~~~ %s:%i: exit'ing\n", __func__, __LINE__);
 
 	return 0;
 }
