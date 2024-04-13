@@ -10,6 +10,7 @@
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/types.h>
+#include <threads.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -17,6 +18,10 @@
 #include <arpa/inet.h> // inet_ntop()
 
 #include "libsap.h"
+
+#ifdef __STDC_NO_THREADS__
+#error I need threads to build this program!
+#endif
 
 #ifndef __GNUC__
 #define IN6_IS_ADDR_MULTICAST(a) (((const uint8_t *) (a))[0] == 0xff)
@@ -29,6 +34,7 @@
 
 #define SAP_PORT 9875
 #define SAP_PAYLOAD_TYPE_SDP "application/sdp"
+
 
 enum sap_msg_type {
 	SAP_ANNOUNCE = 0,
@@ -225,17 +231,19 @@ static uint8_t sap_get_flags(int sap_af, int msg_type)
 	return flags;
 }
 
-static uint16_t sap_get_rand_uint16(void)
+static uint16_t sap_get_rand_uint16(struct sap_ctx *ctx)
 {
-	srand(time(NULL));
+	int32_t res;
 
-	return rand() % (UINT16_MAX + 1);
+	random_r(&ctx->rand_state.rd, &res);
+
+	return res % (UINT16_MAX + 1);
 }
 
-static uint16_t sap_get_msg_id_hash(uint16_t *msg_id_hash)
+static uint16_t sap_get_msg_id_hash(struct sap_ctx *ctx, uint16_t *msg_id_hash)
 {
 	if (!msg_id_hash)
-		return sap_get_rand_uint16();
+		return sap_get_rand_uint16(ctx);
 	else
 		return ntohs(*msg_id_hash);
 }
@@ -291,7 +299,7 @@ static void sap_create_message(struct sap_ctx *ctx, int sap_af, const char *payl
 	struct sap_packet packet = {
 		.flags = sap_get_flags(sap_af, msg_type),
 		.auth_len = 0,
-		.msg_id_hash = sap_get_msg_id_hash(msg_id_hash),
+		.msg_id_hash = sap_get_msg_id_hash(ctx, msg_id_hash),
 	};
 
 	switch (sap_af) {
@@ -332,7 +340,7 @@ static void sap_create_message(struct sap_ctx *ctx, int sap_af, const char *payl
 	ctx->msg_len = len;
 }
 
-int sap_send(struct sap_ctx *ctx)
+static int sap_send(struct sap_ctx *ctx)
 {
 	return send(ctx->sd, ctx->message, ctx->msg_len, 0);
 }
@@ -420,21 +428,97 @@ static char *sap_get_payload_dest(const char *payload, char *dest)
 	return dest;
 }
 
+static int sap_init_random_add_seed(struct random_data *rd, unsigned int seed)
+{
+	int32_t rand = 0;
+	int ret;
+
+	ret = random_r(rd, &rand);
+	if (ret < 0)
+		return ret;
+
+	return srandom_r(seed ^ rand, rd);
+}
+
+static int sap_init_random(struct sap_ctx *sap_ctx)
+{
+	struct random_data *rd = &sap_ctx->rand_state.rd;
+	pid_t pid = getpid();
+	thrd_t tid = thrd_current();
+	struct timespec uptime, time;
+	int32_t rand;
+	int ret;
+
+	/* We don't need crypto quality random numbers. But we want to:
+	 * a) avoid messing with the global states of (s)rand()/(s)random()
+	 * as we are a library
+	 * b) avoid collisions on embedded systems which often boot
+	 * into the same uptime state and don't have a persistent RTC
+	 * c) be MT safe
+	 */
+
+	memset(rd, 0, sizeof(*rd));
+	ret = initstate_r((unsigned int)pid, sap_ctx->rand_state.rs, sizeof(sap_ctx->rand_state.rs), rd);
+	if (ret < 0)
+		return ret;
+
+	ret = sap_init_random_add_seed(rd, (unsigned int)tid);
+	if (ret < 0)
+		return ret;
+
+	/* uptime */
+	ret = clock_gettime(CLOCK_MONOTONIC, &uptime);
+	if (ret < 0)
+		return ret;
+
+	ret = sap_init_random_add_seed(rd, (unsigned int)uptime.tv_sec);
+	ret |= sap_init_random_add_seed(rd, (unsigned int)uptime.tv_nsec);
+	if (ret < 0)
+		return ret;
+
+	/* system clock */
+	ret = clock_gettime(CLOCK_REALTIME, &time);
+	if (ret < 0)
+		return ret;
+
+	ret = sap_init_random_add_seed(rd, (unsigned int)time.tv_sec);
+	ret |= sap_init_random_add_seed(rd, (unsigned int)time.tv_nsec);
+	if (ret < 0)
+		return ret;
+
+	printf("~~~ %s:%i: up.tv_sec: %li, up.tv_nsec: %li, t.tv_sec: %li, t.tv_nsec: %li\n", __func__, __LINE__, uptime.tv_sec, uptime.tv_nsec, time.tv_sec, time.tv_nsec);
+
+	return 0;
+}
+
 int sap_init(struct sap_ctx *sap_ctx,
 	     char *payload_dest,
 	     int payload_dest_af,
 	     char *payload_filename,
 	     char *payload_type,
 	     int msg_type,
-	     uint16_t *msg_id_hash)
+	     uint16_t *msg_id_hash,
+	     unsigned int interval)
 {
 	char dest[INET6_ADDRSTRLEN];
 	struct sap_ctx ctx;
 	char *payload;
-	int sap_af;
+	int ret, sap_af;
+
+	ctx.msg_type = msg_type;
+	ctx.interval = interval;
+	ctx.term = 0;
+
+	ctx.thread_state.tid = NULL;
+	ctx.thread_state.tid_store = 0;
+	cnd_init(&ctx.thread_state.cnd);
 
 	if (!payload_type)
 		payload_type = SAP_PAYLOAD_TYPE_SDP;
+
+	ret = sap_init_random(&ctx);
+	if (ret < 0)
+		return ret;
 
 	payload = sap_get_payload(payload_filename);
 	if (!payload)
@@ -466,15 +550,142 @@ int sap_init(struct sap_ctx *sap_ctx,
 
 void sap_free(struct sap_ctx *ctx)
 {
+	sap_stop(ctx);
 	close(ctx->sd);
 	free(ctx->message);
 }
 
 static unsigned int sap_get_interval(struct sap_ctx *ctx)
 {
-	unsigned int interval = 300;
-	unsigned int offset;
+	unsigned int interval = 300 * 1000;
+	int offset;
 
-//	offset 
+	if (ctx->interval)
+		return ctx->interval * 1000;
+
+	offset = sap_get_rand_uint16(ctx) % (interval * 2 / 3);
+	offset -= interval / 3;
+
+	printf("~~~ %s:%i: interval: %u, offset: %i\n", __func__, __LINE__, interval, offset);
+	/* should not happen */
+	if (interval + offset < 0)
+		return interval;
+
+	return interval + offset;
+}
+
+//#define MAX_EVENTS 32
+
+static void sap_set_msg_type(struct sap_ctx *ctx, int msg_type)
+{
+	struct sap_packet *packet = (struct sap_packet *)ctx->message;
+
+	/* SAP_TERMINATE */
+	if (msg_type)
+		packet->flags |= BIT(2);
+	/* SAP_ANNOUNCE */
+	else
+		packet->flags &= ~BIT(2);
+}
+
+void sap_msleep(struct sap_ctx *ctx, unsigned int msecs)
+{
+	usleep(msecs * 1000);
+}
+
+int sap_run(struct sap_ctx *ctx)
+{
+	int ret;
+//	static struct epoll_event events[MAX_EVENTS];
+//	static int epoll_fd;
+
+	unsigned int timeout;
+//	int epoll_fd = epoll_create1(0);
+
+	/* Without an explicit interval and with a specific
+	 * message type we will just send a single one-shot
+	 * packet of this type.
+	 */
+	if (!ctx->interval && ctx->msg_type >= 0) {
+		ret = sap_send(ctx);
+		goto out;
+	}
+
+	printf("~~~ %s:%i: here1\n", __func__, __LINE__);
+//	timeout = sap_get_interval(ctx);
+
+	while(!ctx->term) {
+//		epoll_wait(epoll_fd, events, MAX_EVENTS, timeout)
+
+		timeout = sap_get_interval(ctx);
+
+		sap_msleep(ctx, timeout);
+
+	printf("~~~ %s:%i: here1, %u\n", __func__, __LINE__, timeout);
+		ret = sap_send(ctx);
+		if (ret < 0)
+			goto out;
+
+//		sleep(sap_get_interval(ctx));
+	}
+
+	printf("~~~ %s:%i: term=1, getting out\n", __func__, __LINE__);
+	if (ctx->msg_type < 0) {
+		sap_set_msg_type(ctx, SAP_TERMINATE);
+		/* TODO: update payload, RFC2974, section 6:
+		 * "If the payload format is `application/sdp'
+		 *  the deletion message is a single SDP line consisting of the origin
+		 *  field of the announcement to be deleted."
+		 */
+		ret = sap_send(ctx);
+		goto out;
+	}
+
+	ret = 0;
+out:
+	ctx->term = 0;
+	return ret;
+
+//	close(epoll_fd);
+}
+
+int sap_run_thread(void *arg)
+{
+	struct sap_ctx *ctx = arg;
+
+	return sap_run(ctx);
+}
+
+int sap_start(struct sap_ctx *ctx)
+{
+	thrd_t tid;
+	int ret;
+
+	ret = thrd_create(&tid, sap_run_thread, ctx);
+	if (ret != thrd_success)
+		return -EPERM;
+
+	ctx->thread_state.tid_store = tid;
+	ctx->thread_state.tid = &ctx->thread_state.tid_store;
+
 	return 0;
+}
+
+void sap_stop(struct sap_ctx *ctx)
+{
+	ctx->term = 1;
+
+	if (ctx->thread_state.tid) {
+		thrd_join(*ctx->thread_state.tid, NULL);
+		ctx->thread_state.tid = NULL;
+		ctx->thread_state.tid_store = 0;
+	}
+
+	/* waiting for runner to finish in case it's not a thread but
+	 * a child/fork()'d process instead
+	 */
+/*	while (ctx->term) {
+	printf("~~~ %s:%i: waiting for runner to finish\n", __func__, __LINE__);
+		sleep(1);
+	}*/
 }
