@@ -496,6 +496,37 @@ static int sap_init_random(struct sap_ctx *sap_ctx)
 	return 0;
 }
 
+static int sap_init_epoll(struct sap_ctx *ctx)
+{
+	struct epoll_event event;
+	int ret = -EINVAL;
+
+	ctx->epoll_fd = epoll_create1(0);
+	if (!ctx->epoll_fd < 0)
+		goto err1;
+
+	ret = pipe(ctx->thread_state.pipefd);
+	if (ret < 0) {
+		goto err2;
+	}
+
+	memset(&event, 0, sizeof(event));
+	event.events = EPOLLIN;
+	event.data.fd = ctx->thread_state.pipefd[0];
+	ret = epoll_ctl(ctx->epoll_fd, EPOLL_CTL_ADD, event.data.fd, &event);
+	if (ret < 0)
+		goto err3;
+
+	return 0;
+err3:
+	close(ctx->thread_state.pipefd[0]);
+	close(ctx->thread_state.pipefd[1]);
+err2:
+	close(ctx->epoll_fd);
+err1:
+	return ret;
+}
+
 int sap_init(struct sap_ctx *sap_ctx,
 	     char *payload_dest,
 	     int payload_dest_af,
@@ -516,7 +547,6 @@ int sap_init(struct sap_ctx *sap_ctx,
 
 	ctx.thread_state.tid = NULL;
 	ctx.thread_state.tid_store = 0;
-//	cnd_init(&ctx.thread_state.cnd);
 
 	if (!payload_type)
 		payload_type = SAP_PAYLOAD_TYPE_SDP;
@@ -525,32 +555,45 @@ int sap_init(struct sap_ctx *sap_ctx,
 	if (ret < 0)
 		return ret;
 
+	ret = sap_init_epoll(&ctx);
+	if (ret < 0)
+		return -EPERM;
+
 	payload = sap_get_payload(payload_filename);
-	if (!payload)
-		return -ENOENT;
+	if (!payload) {
+		ret = -ENOENT;
+		goto err1;
+	}
 
 	if (!payload_dest && !strcmp(payload_type, SAP_PAYLOAD_TYPE_SDP))
 		payload_dest = sap_get_payload_dest(payload, dest);
 	if (!payload_dest) {
-		free(payload);
-		return -EINVAL;
+		ret = -EINVAL;
+		goto err2;
 	}
 
 	ctx.sd = sap_create_socket(payload_dest, payload_dest_af, &sap_af);
 	if (ctx.sd < 0) {
-		free(payload);
-		return -EHOSTUNREACH;
+		ret = -EHOSTUNREACH;
+		goto err2;
 	}
 
 	sap_create_message(&ctx, sap_af, payload, payload_type, msg_type, msg_id_hash);
 	if (!ctx.message) {
-		free(payload);
-		close(ctx.sd);
-		return -EINVAL;
+		ret = -EINVAL;
+		goto err3;
 	}
 
 	*sap_ctx = ctx;
 	return 0;
+
+err3:
+	close(ctx.sd);
+err2:
+	free(payload);
+err1:
+	close(ctx.epoll_fd);
+	return ret;
 }
 
 void sap_free(struct sap_ctx *ctx)
@@ -616,25 +659,11 @@ static void sap_set_msg_type(struct sap_ctx *ctx, int msg_type)
 	usleep(msecs * 1000);
 }*/
 
-#define MAX_EVENTS 32
-
-static struct epoll_event events[MAX_EVENTS];
-static int epoll_fd;
-
 int sap_run(struct sap_ctx *ctx)
 {
 	int ret;
-//	static struct epoll_event events[MAX_EVENTS];
-//	static int epoll_fd;
 
 	int sfd, timeout, ev_count = 0;
-//	int epoll_fd = epoll_create1(0);
-
-	epoll_fd = epoll_create1(0);
-
-	ret = pipe(ctx->thread_state.pipefd);
-	if (ret < 0)
-		exit(5);
 
 	/* Without an explicit interval and with a specific
 	 * message type we will just send a single one-shot
@@ -667,14 +696,6 @@ int sap_run(struct sap_ctx *ctx)
 
 	printf("~~~ %s:%i: signalfd(): ret: %i\n", __func__, __LINE__, sfd);*/
 
-	struct epoll_event event;
-	memset(&event, 0, sizeof(event));
-	event.events = EPOLLIN;
-	event.data.fd = ctx->thread_state.pipefd[0];
-
-	if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, event.data.fd, &event))
-		exit(3);
-
 
 	while(!ctx->term) {
 //		epoll_wait(epoll_fd, events, MAX_EVENTS, timeout)
@@ -683,13 +704,13 @@ int sap_run(struct sap_ctx *ctx)
 
 		printf("~~~ %s:%i: calling: epoll_wait(), timeout: %i  (ctx->term: %i)\n", __func__, __LINE__, timeout, ctx->term);
 //		sap_msleep(ctx, timeout);
-		ev_count = epoll_wait(epoll_fd, events, MAX_EVENTS, timeout);
+		ev_count = epoll_wait(ctx->epoll_fd, ctx->events, SAP_EPOLL_MAX_EVENTS, timeout);
 //		ev_count = epoll_pwait(epoll_fd, events, MAX_EVENTS, timeout, &mask);
 //		ev_count = epoll_pwait(epoll_fd, events, MAX_EVENTS, timeout, NULL);
 
 		printf("~~~ %s:%i: epoll_wait() returned, ev_count: %i (ctx->term: %i)\n", __func__, __LINE__, ev_count, ctx->term);
 		for(int i = 0; i < ev_count; i++) {
-			printf("~~~ %s:%i: epoll_wait(), ev: %i, fd: %i (ctx->term: %i)\n", __func__, __LINE__, i, events[i].data.fd, ctx->term);
+			printf("~~~ %s:%i: epoll_wait(), ev: %i, fd: %i (ctx->term: %i)\n", __func__, __LINE__, i, ctx->events[i].data.fd, ctx->term);
 //			events[i].data.fd
 		}
 
@@ -769,30 +790,19 @@ int sap_start(struct sap_ctx *ctx)
 
 void sap_term(struct sap_ctx *ctx)
 {
-/*	sigset_t mask, old_mask;
-	sigemptyset(&mask);
-	sigaddset(&mask, SIGINT);
-	sigaddset(&mask, SIGHUP);
-	sigaddset(&mask, SIGTERM);
-	//sigaddset(&mask, SIGQUIT);
-	//
-	pthread_sigmask(SIG_BLOCK, &mask, &old_mask);*/
-
-
 	printf("~~~ %s:%i: start\n", __func__, __LINE__);
 	ctx->term = 1;
+	/* memory barrier needed against reordering? */
 	char c = '\0';
 	write(ctx->thread_state.pipefd[1], &c, sizeof(c));
-//	pthread_kill(*ctx->thread_state.tid, SIGINT);
 
-//	pthread_sigmask(SIG_UNBLOCK, &mask, &old_mask);
 
-//	pthread_kill(*ctx->thread_state.tid, SIGHUP);
 	printf("~~~ %s:%i: term = 1 set\n", __func__, __LINE__);
 }
 
 void sap_stop(struct sap_ctx *ctx)
 {
+	sap_term(ctx);
 	printf("~~~ %s:%i: start\n", __func__, __LINE__);
 
 	if (ctx->thread_state.tid) {
