@@ -39,6 +39,7 @@
 
 #define SAP_PORT 9875
 #define SAP_PAYLOAD_TYPE_SDP "application/sdp"
+#define SAP_INTERVAL_SEC 300
 
 
 enum sap_msg_type {
@@ -527,88 +528,123 @@ err1:
 	return ret;
 }
 
-int sap_init(struct sap_ctx *sap_ctx,
-	     char *payload_dest,
-	     int payload_dest_af,
-	     char *payload_filename,
-	     char *payload_type,
-	     int msg_type,
-	     uint16_t *msg_id_hash,
-	     unsigned int interval)
+/* use this if you need full, customized control, e.g. for debugging (tools) */
+struct sap_ctx *sap_init_custom(
+	char *payload_dest,
+	int payload_dest_af,
+	char *payload_filename,
+	char *payload_type,
+	int msg_type,
+	uint16_t *msg_id_hash,
+	unsigned int interval,
+	int no_jitter,
+	unsigned long count)
 {
 	char dest[INET6_ADDRSTRLEN];
-	struct sap_ctx ctx;
+	struct sap_ctx *ctx;
 	char *payload;
 	int ret, sap_af;
 
-	ctx.msg_type = msg_type;
-	ctx.interval = interval;
-	ctx.term = 0;
+	ctx = malloc(sizeof(*ctx));
+	if (!ctx) {
+		errno = -ENOMEM;
+		return NULL;
+	}
 
-	ctx.thread_state.tid = NULL;
-	ctx.thread_state.tid_store = 0;
+	memset(ctx, 0, sizeof(*ctx));
+	ctx->msg_type = msg_type;
+	ctx->interval = interval;
+	ctx->no_jitter = no_jitter;
+	ctx->count = count;
+	ctx->term = 0;
+	ctx->thread_state.tid = NULL;
+	ctx->thread_state.tid_store = 0;
+
+	if (mtx_init(&ctx->thread_state.ctrl_lock, mtx_plain) == thrd_error)
+		goto err1;
 
 	if (!payload_type)
 		payload_type = SAP_PAYLOAD_TYPE_SDP;
 
-	ret = sap_init_random(&ctx);
-	if (ret < 0)
-		return ret;
-
-	ret = sap_init_epoll(&ctx);
-	if (ret < 0)
-		return -EPERM;
+	ret = sap_init_random(ctx);
+	if (ret < 0) {
+		errno = ret;
+		goto err2;
+	}
 
 	payload = sap_get_payload(payload_filename);
 	if (!payload) {
-		ret = -ENOENT;
-		goto err1;
+		errno = -ENOENT;
+		goto err2;
 	}
 
 	if (!payload_dest && !strcmp(payload_type, SAP_PAYLOAD_TYPE_SDP))
 		payload_dest = sap_get_payload_dest(payload, dest);
 	if (!payload_dest) {
-		ret = -EINVAL;
-		goto err2;
-	}
-
-	ctx.sd = sap_create_socket(payload_dest, payload_dest_af, &sap_af);
-	if (ctx.sd < 0) {
-		ret = -EHOSTUNREACH;
-		goto err2;
-	}
-
-	sap_create_message(&ctx, sap_af, payload, payload_type, msg_type, msg_id_hash);
-	if (!ctx.message) {
-		ret = -EINVAL;
+		errno = -EINVAL;
 		goto err3;
 	}
 
-	*sap_ctx = ctx;
-	return 0;
+	sap_create_message(ctx, sap_af, payload, payload_type, msg_type, msg_id_hash);
+	if (!ctx->message) {
+		errno = -EINVAL;
+		goto err3;
+	}
 
-err3:
-	close(ctx.sd);
-err2:
+	ctx->sd = sap_create_socket(payload_dest, payload_dest_af, &sap_af);
+	if (ctx->sd < 0) {
+		errno = -EHOSTUNREACH;
+		goto err4;
+	}
+
+	ret = sap_init_epoll(ctx);
+	if (ret < 0) {
+		errno = -EPERM;
+		goto err5;
+	}
+
 	free(payload);
+	return ctx;
+
+err5:
+	close(ctx->sd);
+err4:
+	free(ctx->message);
+err3:
+	free(payload);
+err2:
+	mtx_destroy(&ctx->thread_state.ctrl_lock);
 err1:
-	close(ctx.epoll_fd);
-	return ret;
+	free(ctx);
+	return NULL;
+}
+
+/* use this for fully RFC2974 compliant execution, e.g. for daemons */
+struct sap_ctx *sap_init(char *payload_filename)
+{
+	return sap_init_custom(NULL, AF_UNSPEC, payload_filename, NULL, -1, NULL, 0, 0, 0);
 }
 
 void sap_free(struct sap_ctx *ctx)
 {
+	close(ctx->epoll_fd);
 	close(ctx->sd);
 	free(ctx->message);
+	mtx_destroy(&ctx->thread_state.ctrl_lock);
+	free(ctx);
 }
 
+/* in milliseconds */
 static unsigned int sap_get_interval(struct sap_ctx *ctx)
 {
-	unsigned int interval = 300 * 1000;
+	unsigned int interval = SAP_INTERVAL_SEC * 1000;
 	int offset;
 
 	if (ctx->interval)
-		return ctx->interval * 1000;
+		interval = ctx->interval * 1000;
+
+	if (ctx->no_jitter)
+		return interval;
 
 	offset = sap_get_rand_uint16(ctx) % (interval * 2 / 3);
 	offset -= interval / 3;
@@ -619,6 +655,40 @@ static unsigned int sap_get_interval(struct sap_ctx *ctx)
 		return interval;
 
 	return interval + offset;
+}
+
+/* in milliseconds */
+static int sap_get_timeout(struct sap_ctx *ctx)
+{
+	struct timespec now;
+	int64_t diff;
+//	int timeout = 
+
+	clock_gettime(CLOCK_MONOTONIC, &now);
+
+	diff = timespec_diffus(now, ctx->epoll_timeout) / 1000;
+	if (diff < 0)
+		return 0;
+
+	return (diff > INT_MAX) ? INT_MAX : (int)diff;
+}
+
+static void sap_set_timeout_next(struct sap_ctx *ctx)
+{
+	unsigned int interval = sap_get_interval(ctx);
+	struct timespec now, add;
+
+	clock_gettime(CLOCK_MONOTONIC, &now);
+
+	add.tv_sec = interval / 1000;
+	add.tv_nsec = (interval % 1000) * (1000*1000);
+
+	ctx->epoll_timeout = timespec_sum(now, add);
+}
+
+static void sap_set_timeout_now(struct sap_ctx *ctx)
+{
+	clock_gettime(CLOCK_MONOTONIC, &ctx->epoll_timeout);
 }
 
 /*static int sap_get_next_timeout(struct sap_ctx *ctx)
@@ -661,9 +731,10 @@ static void sap_set_msg_type(struct sap_ctx *ctx, int msg_type)
 
 int sap_run(struct sap_ctx *ctx)
 {
+	unsigned long count = 0;
 	int ret;
 
-	int sfd, timeout, ev_count = 0;
+	int sfd, timeout = -1, ev_count = -1;
 
 	/* Without an explicit interval and with a specific
 	 * message type we will just send a single one-shot
@@ -673,6 +744,19 @@ int sap_run(struct sap_ctx *ctx)
 		ret = sap_send(ctx);
 		goto out;
 	}
+
+	/* for standard RFC2974 operation, we should not send immediately,
+	 * but instead wait and listen first (see section 3.1.1)
+	 */
+	if (ctx->msg_type == -1)
+		sap_set_timeout_next(ctx);
+	/* when msg_type is set explicitly then we assume the user is
+	 * using this for debugging and needs more immediate
+	 * responsiveness
+	 */
+	else
+		sap_set_timeout_now(ctx);
+
 
 	printf("~~~ %s:%i: here1\n", __func__, __LINE__);
 //	timeout = sap_get_interval(ctx);
@@ -698,15 +782,30 @@ int sap_run(struct sap_ctx *ctx)
 
 
 	while(!ctx->term) {
-//		epoll_wait(epoll_fd, events, MAX_EVENTS, timeout)
+		/* we timed out */
+		if (!ev_count || !timeout) {
+			if (ctx->count && (count++) >= ctx->count)
+				break;
 
-		timeout = sap_get_interval(ctx);
+			ret = sap_send(ctx);
+			if (ret < 0) {
+		printf("~~~ %s:%i: getting out after sap_send()\n", __func__, __LINE__);
+				goto out;
+			}
+
+			/* for "debug mode" exit immediately, don't wait
+			 * for another interval
+			 */
+			if (ctx->msg_type >= 0 &&
+			    ctx->count && count >= ctx->count)
+				goto out;
+
+			sap_set_timeout_next(ctx);
+		}
 
 		printf("~~~ %s:%i: calling: epoll_wait(), timeout: %i  (ctx->term: %i)\n", __func__, __LINE__, timeout, ctx->term);
-//		sap_msleep(ctx, timeout);
+		timeout = sap_get_timeout(ctx);
 		ev_count = epoll_wait(ctx->epoll_fd, ctx->events, SAP_EPOLL_MAX_EVENTS, timeout);
-//		ev_count = epoll_pwait(epoll_fd, events, MAX_EVENTS, timeout, &mask);
-//		ev_count = epoll_pwait(epoll_fd, events, MAX_EVENTS, timeout, NULL);
 
 		printf("~~~ %s:%i: epoll_wait() returned, ev_count: %i (ctx->term: %i)\n", __func__, __LINE__, ev_count, ctx->term);
 		for(int i = 0; i < ev_count; i++) {
@@ -715,11 +814,6 @@ int sap_run(struct sap_ctx *ctx)
 		}
 
 	printf("~~~ %s:%i: here1, %u\n", __func__, __LINE__, timeout);
-		ret = sap_send(ctx);
-		if (ret < 0) {
-	printf("~~~ %s:%i: getting out after sap_send()\n", __func__, __LINE__);
-			goto out;
-		}
 
 //		sleep(sap_get_interval(ctx));
 	}
@@ -756,36 +850,35 @@ int sap_start(struct sap_ctx *ctx)
 	thrd_t tid;
 	int ret;
 
+	mtx_lock(&ctx->thread_state.ctrl_lock);
+	/* already running */
+	if (ctx->thread_state.tid)
+		goto err1;
+
 	sigset_t mask, old_mask;
 	sigemptyset(&mask);
 	sigaddset(&mask, SIGINT);
 	sigaddset(&mask, SIGHUP);
 	sigaddset(&mask, SIGTERM);
-	//sigaddset(&mask, SIGQUIT);
-	//
-	if (pthread_sigmask(SIG_BLOCK, &mask, &old_mask) == -1)
-//	if (sigprocmask(SIG_BLOCK, &mask, &old_mask) == -1)
-//	if (sigprocmask(SIG_SETMASK, &mask, &old_mask) == -1)
-		//err(EXIT_FAILURE, "sigprocmask");
-		exit(1);
 
-//	for (int i = 0; i < _NSIG_WORDS; i++)
-//		printf("~~~ %s:%i: mask[%i]: %lu\n", i, old_mask.sig[i]);
-//	for (int i = 0; i < _SIGSET_NWORDS; i++)
-//		printf("~~~ %s:%i: old_mask[%i]: %lu, new_mask[%i]\n", __func__, __LINE__, i, old_mask.__val[i], mask.__val[i]);
+	if (pthread_sigmask(SIG_BLOCK, &mask, &old_mask) == -1) {
+		ret = -EINVAL;
+		goto err1;
+	}
 
 	ret = thrd_create(&tid, sap_run_thread, ctx);
-	if (ret != thrd_success)
-		return -EPERM;
-
-//	pthread_sigmask(SIG_SETMASK, &old_mask, NULL);
-	pthread_sigmask(SIG_UNBLOCK, &mask, NULL);
-//	sigprocmask(SIG_SETMASK, &old_mask, NULL);
+	if (ret != thrd_success) {
+		ret = -EPERM;
+		goto err2;
+	}
 
 	ctx->thread_state.tid_store = tid;
 	ctx->thread_state.tid = &ctx->thread_state.tid_store;
-
-	return 0;
+err2:
+	pthread_sigmask(SIG_UNBLOCK, &mask, NULL);
+err1:
+	mtx_unlock(&ctx->thread_state.ctrl_lock);
+	return ret;
 }
 
 void sap_term(struct sap_ctx *ctx)
@@ -805,6 +898,8 @@ void sap_stop(struct sap_ctx *ctx)
 	sap_term(ctx);
 	printf("~~~ %s:%i: start\n", __func__, __LINE__);
 
+	mtx_lock(&ctx->thread_state.ctrl_lock);
+
 	if (ctx->thread_state.tid) {
 //	pthread_kill(*ctx->thread_state.tid, SIGINT);
 //	pthread_kill(*ctx->thread_state.tid, SIGHUP);
@@ -818,6 +913,7 @@ void sap_stop(struct sap_ctx *ctx)
 		ctx->thread_state.tid_store = 0;
 	}
 
+	mtx_unlock(&ctx->thread_state.ctrl_lock);
 	/* waiting for runner to finish in case it's not a thread but
 	 * a child/fork()'d process instead
 	 */
@@ -826,3 +922,5 @@ void sap_stop(struct sap_ctx *ctx)
 		sleep(1);
 	}*/
 }
+
+
