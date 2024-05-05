@@ -76,9 +76,31 @@ static void usage(char *prog)
 //	printf("    -m <bytes>                          Packet MTU (default: min(1000, iface-MTU))\n");
 }
 
-static void get_args(int argc, char *argv[], int *addr_family, char **dest, char **payload_filename, char **payload_type, int *msg_type, uint16_t **p_msg_id_hash, unsigned int *interval, int *no_jitter, unsigned long *count)
+char *getopt_args_fmt = "46d:p:t:T:I:i:Jc:m:h";
+
+static unsigned int get_num_dests(int argc, char *argv[])
+{
+	unsigned int num_dests = 0;
+	int opt;
+
+	while ((opt = getopt(argc, argv, getopt_args_fmt)) != -1) {
+		switch (opt) {
+		case 'd':
+			num_dests++;
+			break;
+		}
+	}
+
+	optind = 1;
+
+	return num_dests;
+}
+
+static void get_args(int argc, char *argv[], int *addr_family, char ***dests, unsigned int num_dests, char **payload_filename, char **payload_type, int *msg_type, uint16_t **p_msg_id_hash, unsigned int *interval, int *no_jitter, unsigned long *count)
 {
 	int msg_id_hash_found = 0;
+	int dests_idx = 0;
+//	char **my_dests;
 	unsigned long num;
 	int opt, ret;
 
@@ -88,7 +110,20 @@ static void get_args(int argc, char *argv[], int *addr_family, char **dest, char
 		exit(1);
 	}
 
-	while ((opt = getopt(argc, argv, "46d:p:t:T:I:i:Jc:m:h")) != -1) {
+	if (num_dests) {
+		//*dests = malloc(sizeof(*dests) * (num_dests+1));
+		// one more element with NULL to point to the end
+		*dests = calloc(num_dests + 1, sizeof(*dests));
+		if (!*dests) {
+			fprintf(stderr, "Error: Could not allocate destinations\n");
+			usage(argv[0]);
+			exit(1);
+		}
+	}
+
+	printf("~~~ %s:%i: here\n", __func__, __LINE__);
+	while ((opt = getopt(argc, argv, getopt_args_fmt)) != -1) {
+	printf("~~~ %s:%i: here\n", __func__, __LINE__);
 		switch (opt) {
 		case '4':
 			if (*addr_family != AF_UNSPEC)
@@ -104,10 +139,11 @@ static void get_args(int argc, char *argv[], int *addr_family, char **dest, char
 			break;
 		/* TODO: allow multiple "-d" options */
 		case 'd':
-			printf("~~~ %s:%i: -d: %s\n", __func__, __LINE__, optarg);
-			*dest = optarg;
+			printf("~~~ %s:%i: -d: %s (num_dests: %u, idx: %i\n", __func__, __LINE__, optarg, num_dests, dests_idx);
+			(*dests)[dests_idx++] = optarg;
 			break;
 		case 'p':
+	printf("~~~ %s:%i: here\n", __func__, __LINE__);
 			if (!strcmp("-", optarg))
 				break;
 			*payload_filename = optarg;
@@ -174,9 +210,10 @@ static void get_args(int argc, char *argv[], int *addr_family, char **dest, char
 
 int main(int argc, char *argv[])
 {
+	unsigned int num_dests = get_num_dests(argc, argv);
+	char **dests = NULL;
 	int addr_family = AF_UNSPEC;
 	char *payload_type = NULL;
-	char *dest = NULL;
 	char *payload_filename = NULL;
 	struct sap_ctx *ctx;
 	int msg_type = -1;
@@ -187,9 +224,9 @@ int main(int argc, char *argv[])
 	int no_jitter = 0;
 	unsigned long count = 0;
 
-	get_args(argc, argv, &addr_family, &dest, &payload_filename, &payload_type, &msg_type, &p_msg_id_hash, &interval, &no_jitter, &count);
+	get_args(argc, argv, &addr_family, &dests, num_dests, &payload_filename, &payload_type, &msg_type, &p_msg_id_hash, &interval, &no_jitter, &count);
 
-	ctx = sap_init_custom(dest, addr_family, payload_filename, payload_type,
+	ctx = sap_init_custom(dests, addr_family, payload_filename, payload_type,
 			      msg_type, p_msg_id_hash, interval, no_jitter, count);
 	if (!ctx) {
 		usage(argv[0]);

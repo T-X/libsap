@@ -9,33 +9,52 @@
 #include <threads.h>
 #include <unistd.h>
 
+#include "list.h"
+
 #define SAP_EPOLL_MAX_EVENTS 32
 
+//struct sap_epoll_ctx {
+//	enum sap_epoll_data_type type;
+//	void *ctx;
+//};
+
+enum sap_epoll_ctx_type {
+	SAP_EPOLL_CTX_TYPE_NONE = 0,
+	SAP_EPOLL_CTX_TYPE_RX,
+	SAP_EPOLL_CTX_TYPE_TX,
+};
+
+/*struct sap_epoll_ctx_fd {
+	enum sap_epoll_ctx_type type;
+	int fd;
+}*/
+
 struct sap_ctx {
-	int sd;
-	char *message;
-	size_t msg_len;
+	struct hlist_head dest_list;
 	int msg_type;
 	unsigned int interval;
 	int no_jitter;
 	unsigned long count;
+	int term;
 	struct {
 		struct random_data rd;
 		char rs[256];
-	} rand_state;
-	int term;
-	struct epoll_event events[SAP_EPOLL_MAX_EVENTS];
-	int epoll_fd;
-	struct timespec epoll_timeout;
+	} rand;
+	struct {
+		struct epoll_event events[SAP_EPOLL_MAX_EVENTS];
+		int epoll_fd;
+		struct timespec epoll_timeout;
+	} epoll;
 	struct {
 		thrd_t *tid;
 		thrd_t tid_store;
-		int pipefd[2];
 		mtx_t ctrl_lock;
-	} thread_state;
+		int pipefd[2];
+		enum sap_epoll_ctx_type epoll_ctx;
+	} thread;
 };
 
-struct sap_ctx *sap_init_custom(char *payload_dest,
+struct sap_ctx *sap_init_custom(char *payload_dests[],
 				int payload_dest_af,
 				char *payload_filename,
 				char *payload_type,
