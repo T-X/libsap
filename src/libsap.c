@@ -140,6 +140,8 @@ static int sap_get_ip6_dst(const struct sockaddr_in6 *pay_dst, struct sockaddr_i
 		/* global scope */
 		dst.s6_addr[1] = 0x0e;
 
+//printf("~~~ %s:%i: pay_dst: %i\n", __func__, __LINE__, pay_dst->sin6_family);
+//printf("~~~ %s:%i: here\n", __func__, __LINE__);
 	sap_dst->sin6_family = pay_dst->sin6_family;
 	sap_dst->sin6_addr = dst;
 	sap_dst->sin6_port = htons(SAP_PORT);
@@ -149,17 +151,15 @@ static int sap_get_ip6_dst(const struct sockaddr_in6 *pay_dst, struct sockaddr_i
 	return 0;
 }
 
-static int sap_get_ip_dst(const struct sockaddr *addr, struct sockaddr_storage *sap_dst)
+static int sap_get_ip_dst(struct sockaddr *addr, struct sockaddr_storage *sap_dst)
 {
 	switch (addr->sa_family) {
 	case AF_INET:
-		return sap_get_ip4_dst((const struct sockaddr_in *)addr,
+		return sap_get_ip4_dst((struct sockaddr_in *)addr,
 				       (struct sockaddr_in *)sap_dst);
-		break;
 	case AF_INET6:
-		return sap_get_ip6_dst((const struct sockaddr_in6 *)addr,
+		return sap_get_ip6_dst((struct sockaddr_in6 *)addr,
 				       (struct sockaddr_in6 *)sap_dst);
-		break;
 	}
 
 	return -EPROTONOSUPPORT;
@@ -226,7 +226,7 @@ static int sap_join_dest(struct sap_ctx_dest *ctx_dest)
 
 static int sap_create_socket(struct sap_ctx_dest *ctx_dest, char *pay_dst, int af_hint)
 {
-//	char dest[INET6_ADDRSTRLEN];
+	char dest[INET6_ADDRSTRLEN];
 	struct sockaddr_storage sap_dst = { 0 };
 	struct addrinfo hints, *servinfo, *p;
 	int ret, sd = -EINVAL;
@@ -247,12 +247,16 @@ static int sap_create_socket(struct sap_ctx_dest *ctx_dest, char *pay_dst, int a
 		return ret;
 
 	for (p = servinfo; p; p = p->ai_next) {
-//inet_ntop(p->ai_family, &((struct sockaddr_in6 *)&p->ai_addr)->sin6_addr, dest, sizeof(dest));
-//printf("~~~ %s:%i: here, ai_family: %i, ai_addr: %s\n", __func__, __LINE__, p->ai_family, dest);
+inet_ntop(p->ai_family, &((struct sockaddr_in6 *)&p->ai_addr)->sin6_addr, dest, sizeof(dest));
+printf("~~~ %s:%i: here, ai_family: %i, ai_addr: %s\n", __func__, __LINE__, p->ai_family, dest);
 		ret = sap_get_ip_dst(p->ai_addr, &sap_dst);
 		if (ret < 0)
 			break;
 
+		if (p->ai_addr->sa_family != sap_dst.ss_family)
+			fprintf(stderr, "Error: address family was not copied? %i vs. %i\n", p->ai_addr->sa_family, sap_dst.ss_family);
+
+printf("~~~ %s:%i: sap_dst.ss_family: %i, proto: %i\n", __func__, __LINE__, sap_dst.ss_family,IPPROTO_UDP);
 		sd = socket(sap_dst.ss_family, SOCK_DGRAM, IPPROTO_UDP);
 		if (sd >= 0)
 			break;
@@ -279,10 +283,19 @@ printf("~~~ %s:%i: HEEERE\n", __func__, __LINE__);
 	if (ret < 0)
 		goto err;*/
 
-	ret = bind(sd, (const struct sockaddr *)&sap_dst, sizeof(sap_dst));
+printf("~~~ %s:%i: HEEERE2\n", __func__, __LINE__);
+	struct sockaddr_in6 listen = { 0 };
+	listen.sin6_family = AF_INET6;
+//	listen.sin6_port = ((struct sockaddr_in6 *)&sap_dst)->sin6_port;
+	listen.sin6_port = htons(SAP_PORT);
+	listen.sin6_addr = in6addr_any;
+	listen.sin6_scope_id = ((struct sockaddr_in6 *)&sap_dst)->sin6_scope_id;
+
+	ret = bind(sd, (const struct sockaddr *)&listen, sizeof(listen));
 	if (ret < 0)
 		goto err;
 
+printf("~~~ %s:%i: HEEERE3\n", __func__, __LINE__);
 /*	ret = connect(sd, (const struct sockaddr *)&sap_dst, sizeof(sap_dst));
 	if (ret < 0)
 		goto err;*/
