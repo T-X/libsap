@@ -55,14 +55,20 @@ struct sap_packet {
 	uint16_t msg_id_hash;
 } __attribute__ ((__packed__));
 
+union sap_sockaddr_union {
+	struct sockaddr_in in;
+	struct sockaddr_in6 in6;
+	struct sockaddr s;
+};
+
 struct sap_ctx_dest {
 	struct sap_ctx *ctx;
 	enum sap_epoll_ctx_type epoll_ctx_rx;
 	enum sap_epoll_ctx_type epoll_ctx_tx;
 	int sd;
 	int timer_fd;
-	struct sockaddr_storage dest;
-	struct sockaddr_storage src;
+	union sap_sockaddr_union dest;
+	union sap_sockaddr_union src;
 	char *message;
 	size_t msg_len;
 	struct hlist_node node;
@@ -119,6 +125,7 @@ static int sap_get_ip4_dst(const struct sockaddr_in *pay_dst, struct sockaddr_in
 
 static int sap_get_ip6_dst(const struct sockaddr_in6 *pay_dst, struct sockaddr_in6 *sap_dst)
 {
+	char dest[INET6_ADDRSTRLEN];
 	/* TODOs/open questions:
 	 * Should we really accept unicast payload destinations here?
 	 * (VLC does?)
@@ -148,37 +155,41 @@ static int sap_get_ip6_dst(const struct sockaddr_in6 *pay_dst, struct sockaddr_i
 	sap_dst->sin6_flowinfo = 0;
 	sap_dst->sin6_scope_id = pay_dst->sin6_scope_id;
 
+inet_ntop(AF_INET6, &pay_dst->sin6_addr, dest, sizeof(dest));
+printf("~~~ %s:%i: here, ai_family: %i, dest: %s, scope_id: %i\n", __func__, __LINE__, pay_dst->sin6_family, dest, pay_dst->sin6_scope_id);
+
+
 	return 0;
 }
 
-static int sap_get_ip_dst(struct sockaddr *addr, struct sockaddr_storage *sap_dst)
+static int sap_get_ip_dst(union sap_sockaddr_union *addr, union sap_sockaddr_union *sap_dst)
 {
-	switch (addr->sa_family) {
+	switch (addr->s.sa_family) {
 	case AF_INET:
-		return sap_get_ip4_dst((struct sockaddr_in *)addr,
-				       (struct sockaddr_in *)sap_dst);
+		return sap_get_ip4_dst(&addr->in,
+				       &sap_dst->in);
 	case AF_INET6:
-		return sap_get_ip6_dst((struct sockaddr_in6 *)addr,
-				       (struct sockaddr_in6 *)sap_dst);
+		return sap_get_ip6_dst(&addr->in6,
+				       &sap_dst->in6);
 	}
 
 	return -EPROTONOSUPPORT;
 }
 
-static int sap_set_hop_limit(int sd, struct sockaddr_storage *sap_dst)
+static int sap_set_hop_limit(int sd, union sap_sockaddr_union *sap_dst)
 {
 	int hops = 255;
 	in_addr_t dst;
 
-	if (sap_dst->ss_family == AF_INET) {
-		dst = ntohl(((struct sockaddr_in *)sap_dst)->sin_addr.s_addr);
+	if (sap_dst->s.sa_family == AF_INET) {
+		dst = ntohl(sap_dst->in.sin_addr.s_addr);
 
 		if (IN_MC_LINK_LOCAL(dst))
 			return 0;
 
 		return setsockopt(sd, IPPROTO_IP, IP_MULTICAST_TTL, &hops,
 				  sizeof(hops));
-	} else if (sap_dst->ss_family == AF_INET6) {
+	} else if (sap_dst->s.sa_family == AF_INET6) {
 		return setsockopt(sd, IPPROTO_IPV6, IPV6_MULTICAST_HOPS, &hops,
 				  sizeof(hops));
 	}
@@ -194,16 +205,19 @@ static int sap_join_dest4(struct sap_ctx_dest *ctx_dest)
 
 static int sap_join_dest6(struct sap_ctx_dest *ctx_dest)
 {
-	struct sockaddr_in6 *dest = (struct sockaddr_in6 *)&ctx_dest->dest;
+	char dest[INET6_ADDRSTRLEN];
 	int ret;
 
+inet_ntop(ctx_dest->dest.in6.sin6_family, &ctx_dest->dest.in6.sin6_addr, dest, sizeof(dest));
+printf("~~~ %s:%i: here, ai_family: %i, dest: %s, scope_id: %i\n", __func__, __LINE__, ctx_dest->dest.in6.sin6_family, dest, ctx_dest->dest.in6.sin6_scope_id);
+
 	struct ipv6_mreq mreq = {
-		.ipv6mr_multiaddr = dest->sin6_addr,
-		.ipv6mr_interface = dest->sin6_scope_id,
+		.ipv6mr_multiaddr = ctx_dest->dest.in6.sin6_addr,
+		.ipv6mr_interface = ctx_dest->dest.in6.sin6_scope_id,
 	};
 
 	ret = setsockopt(ctx_dest->sd, IPPROTO_IPV6, IPV6_JOIN_GROUP,
-			  (void *)&mreq, sizeof(mreq));
+			 &mreq, sizeof(mreq));
 
 	printf("~~~ %s:%i: ret: %i\n", __func__, __LINE__, ret);
 	return ret;
@@ -213,7 +227,7 @@ static int sap_join_dest(struct sap_ctx_dest *ctx_dest)
 {
 	printf("~~~ %s:%i: start\n", __func__, __LINE__);
 
-	switch (ctx_dest->dest.ss_family) {
+	switch (ctx_dest->dest.s.sa_family) {
 	case AF_INET:
 		return sap_join_dest4(ctx_dest);
 	case AF_INET6:
@@ -227,7 +241,8 @@ static int sap_join_dest(struct sap_ctx_dest *ctx_dest)
 static int sap_create_socket(struct sap_ctx_dest *ctx_dest, char *pay_dst, int af_hint)
 {
 	char dest[INET6_ADDRSTRLEN];
-	struct sockaddr_storage sap_dst = { 0 };
+	union sap_sockaddr_union sap_dst = { 0 };
+	union sap_sockaddr_union ai_addr;
 	struct addrinfo hints, *servinfo, *p;
 	int ret, sd = -EINVAL;
 
@@ -247,17 +262,22 @@ static int sap_create_socket(struct sap_ctx_dest *ctx_dest, char *pay_dst, int a
 		return ret;
 
 	for (p = servinfo; p; p = p->ai_next) {
-inet_ntop(p->ai_family, &((struct sockaddr_in6 *)&p->ai_addr)->sin6_addr, dest, sizeof(dest));
+		if (p->ai_addrlen > sizeof(ai_addr))
+			break;
+
+		memcpy(&ai_addr, p->ai_addr, p->ai_addrlen);
+//inet_ntop(p->ai_family, &((struct sockaddr_in6 *)&p->ai_addr)->sin6_addr, dest, sizeof(dest));
+inet_ntop(p->ai_family, &ai_addr.in6.sin6_addr, dest, sizeof(dest));
 printf("~~~ %s:%i: here, ai_family: %i, ai_addr: %s\n", __func__, __LINE__, p->ai_family, dest);
-		ret = sap_get_ip_dst(p->ai_addr, &sap_dst);
+		ret = sap_get_ip_dst(&ai_addr, &sap_dst);
 		if (ret < 0)
 			break;
 
-		if (p->ai_addr->sa_family != sap_dst.ss_family)
-			fprintf(stderr, "Error: address family was not copied? %i vs. %i\n", p->ai_addr->sa_family, sap_dst.ss_family);
+		if (p->ai_addr->sa_family != sap_dst.s.sa_family)
+			fprintf(stderr, "Error: address family was not copied? %i vs. %i\n", p->ai_addr->sa_family, sap_dst.s.sa_family);
 
-printf("~~~ %s:%i: sap_dst.ss_family: %i, proto: %i\n", __func__, __LINE__, sap_dst.ss_family,IPPROTO_UDP);
-		sd = socket(sap_dst.ss_family, SOCK_DGRAM, IPPROTO_UDP);
+printf("~~~ %s:%i: sap_dst.s.sa_family: %i, proto: %i\n", __func__, __LINE__, sap_dst.s.sa_family,IPPROTO_UDP);
+		sd = socket(sap_dst.s.sa_family, SOCK_DGRAM, IPPROTO_UDP);
 		if (sd >= 0)
 			break;
 	}
@@ -272,7 +292,7 @@ printf("~~~ %s:%i: sd: %i\n", __func__, __LINE__, sd);
 	ctx_dest->sd = sd;
 
 printf("~~~ %s:%i: HEEERE\n", __func__, __LINE__);
-/*	ret = connect(sd, (const struct sockaddr *)&sap_dst, sizeof(sap_dst));
+/*	ret = connect(sd, &sap_dst.s, sizeof(sap_dst));
 	if (ret < 0)
 		goto err;
 
@@ -284,21 +304,21 @@ printf("~~~ %s:%i: HEEERE\n", __func__, __LINE__);
 		goto err;*/
 
 printf("~~~ %s:%i: HEEERE2\n", __func__, __LINE__);
-	struct sockaddr_in6 listen = { 0 };
+/*	struct sockaddr_in6 listen = { 0 };
 	listen.sin6_family = AF_INET6;
 //	listen.sin6_port = ((struct sockaddr_in6 *)&sap_dst)->sin6_port;
 	listen.sin6_port = htons(SAP_PORT);
 	listen.sin6_addr = in6addr_any;
-	listen.sin6_scope_id = ((struct sockaddr_in6 *)&sap_dst)->sin6_scope_id;
+	listen.sin6_scope_id = sap_dst.in6.sin6_scope_id;
 
 	ret = bind(sd, (const struct sockaddr *)&listen, sizeof(listen));
 	if (ret < 0)
-		goto err;
+		goto err;*/
 
 printf("~~~ %s:%i: HEEERE3\n", __func__, __LINE__);
-/*	ret = connect(sd, (const struct sockaddr *)&sap_dst, sizeof(sap_dst));
+	ret = connect(sd, (const struct sockaddr *)&sap_dst, sizeof(sap_dst));
 	if (ret < 0)
-		goto err;*/
+		goto err;
 
 	ret = sap_set_hop_limit(sd, &sap_dst);
 	if (ret < 0)
@@ -308,6 +328,7 @@ printf("~~~ %s:%i: HEEERE3\n", __func__, __LINE__);
 	if (ret < 0)
 		goto err;
 
+printf("~~~ %s:%i: HEEERE4\n", __func__, __LINE__);
 	return 0;
 
 err:
@@ -352,23 +373,23 @@ static uint16_t sap_get_msg_id_hash(struct sap_ctx *ctx, uint16_t *msg_id_hash)
 static char *sap_push_orig_source(struct sap_ctx_dest *ctx_dest, char *msg, int sd)
 {
 	/* FIXME? incorrect now, as we don't connect? */
-	struct sockaddr_storage addr;
+	union sap_sockaddr_union addr;
 	socklen_t len = sizeof(addr);
 
 	if (sd < 0)
 		NULL;
 
-	getsockname(sd, (struct sockaddr *)&addr, &len);
+	getsockname(sd, &addr.s, &len);
 	ctx_dest->src = addr;
 
-	switch (addr.ss_family) {
+	switch (addr.s.sa_family) {
 	case AF_INET:
 		struct in_addr *addr4 = (struct in_addr *)msg;
-		*addr4 = ((struct sockaddr_in *)&addr)->sin_addr;
+		*addr4 = addr.in.sin_addr;
 		return msg + sizeof(*addr4);
 	case AF_INET6:
 		struct in6_addr *addr6 = (struct in6_addr *)msg;
-		*addr6 = ((struct sockaddr_in6 *)&addr)->sin6_addr;
+		*addr6 = addr.in6.sin6_addr;
 		return msg + sizeof(*addr6);
 	default:
 		return NULL;
@@ -408,7 +429,7 @@ static char *sap_push_payload(char *msg, const char *payload)
 
 static void sap_create_message(struct sap_ctx_dest *ctx_dest, const char *payload, const char *payload_type, int msg_type, uint16_t msg_id_hash)
 {
-	int sap_af = ctx_dest->dest.ss_family;
+	int sap_af = ctx_dest->dest.s.sa_family;
 	size_t len, orig_source_len = 0;
 	char *msg;
 
@@ -980,24 +1001,24 @@ static void sap_set_msg_type(struct sap_ctx_dest *ctx_dest, int msg_type)
 	return 0;
 }*/
 
-static int sap_is_my_source(struct sap_ctx_dest *ctx_dest, struct sockaddr_storage *addr)
+static int sap_is_my_source(struct sap_ctx_dest *ctx_dest, union sap_sockaddr_union *addr)
 {
-	struct sockaddr_storage *src = &ctx_dest->src;
+	union sap_sockaddr_union *src = &ctx_dest->src;
 	struct in6_addr *ip6;
 
-	printf("~~~ %s:%i: start, af1: %i, af2: %i\n", __func__, __LINE__, src->ss_family, addr->ss_family);
-	if (src->ss_family != addr->ss_family)
+	printf("~~~ %s:%i: start, af1: %i, af2: %i\n", __func__, __LINE__, src->s.sa_family, addr->s.sa_family);
+	if (src->s.sa_family != addr->s.sa_family)
 		return 0;
 
 	printf("~~~ %s:%i: start\n", __func__, __LINE__);
-	switch (src->ss_family) {
+	switch (src->s.sa_family) {
 	case AF_INET:
-		return !memcmp(&((struct sockaddr_in *)src)->sin_addr,
-			       &((struct sockaddr_in *)addr)->sin_addr,
-			       sizeof(struct in_addr));
+		return !memcmp(&src->in.sin_addr,
+			       &addr->in.sin_addr,
+			       sizeof(src->in.sin_addr));
 	case AF_INET6:
 
-	ip6 = &((struct sockaddr_in6 *)src)->sin6_addr;
+	ip6 = &src->in6.sin6_addr;
 	printf("~~~ %s:%i: addr: %08x%08x%08x%08x\n", __func__, __LINE__,
 			ntohl(ip6->s6_addr32[0]),
 			ntohl(ip6->s6_addr32[1]),
@@ -1007,9 +1028,9 @@ static int sap_is_my_source(struct sap_ctx_dest *ctx_dest, struct sockaddr_stora
 
 
 	printf("~~~ %s:%i: start\n", __func__, __LINE__);
-		return !memcmp(&((struct sockaddr_in6 *)src)->sin6_addr,
-			       &((struct sockaddr_in6 *)addr)->sin6_addr,
-			       sizeof(struct in6_addr));
+		return !memcmp(&src->in6.sin6_addr,
+			       &addr->in6.sin6_addr,
+			       sizeof(src->in6.sin6_addr));
 	}
 
 	printf("~~~ %s:%i: start\n", __func__, __LINE__);
@@ -1020,8 +1041,8 @@ static int sap_epoll_rx_handler(struct sap_ctx_dest *ctx_dest)
 {
 	char buffer[2048];
 	unsigned int buf_len = sizeof(buffer);
-	struct sockaddr_storage addr = { 0 };
-	struct sockaddr_storage zero = { 0 };
+	union sap_sockaddr_union addr = { 0 };
+	union sap_sockaddr_union zero = { 0 };
 	struct in6_addr *ip6;
 	char dest[INET6_ADDRSTRLEN];
 	socklen_t addr_len = sizeof(addr);
@@ -1046,10 +1067,10 @@ static int sap_epoll_rx_handler(struct sap_ctx_dest *ctx_dest)
 		return ret;
 
 //	ret = recv(ctx_dest->sd, NULL, 0, MSG_TRUNC);
-	inet_ntop(addr.ss_family, &((struct sockaddr_in6 *)&addr)->sin6_addr, dest, sizeof(dest));
-	printf("~~~ %s:%i: ret: %li, from addr: %s, af: %i, zero-addr: %s\n", __func__, __LINE__, ret, dest, addr.ss_family,
-			!memcmp(&((struct sockaddr_in6 *)&addr)->sin6_addr, &((struct sockaddr_in6 *)&zero)->sin6_addr,
-				sizeof(struct in6_addr)) ? "yes" : "no");
+	inet_ntop(addr.s.sa_family, &addr.in6.sin6_addr, dest, sizeof(dest));
+	printf("~~~ %s:%i: ret: %li, from addr: %s, af: %i, zero-addr: %s\n", __func__, __LINE__, ret, dest, addr.s.sa_family,
+			!memcmp(&addr.in6.sin6_addr, &zero.in6.sin6_addr,
+				sizeof(addr.in6.sin6_addr)) ? "yes" : "no");
 
 	ip6 = &((struct sockaddr_in6 *)&addr)->sin6_addr;
 	printf("~~~ %s:%i: addr: %08x%08x%08x%08x\n", __func__, __LINE__,
@@ -1068,7 +1089,7 @@ static int sap_epoll_rx_handler(struct sap_ctx_dest *ctx_dest)
 //	}
 
 
-	inet_ntop(addr.ss_family, &((struct sockaddr_in6 *)&addr)->sin6_addr, dest, sizeof(dest));
+	inet_ntop(addr.s.sa_family, &addr.in6.sin6_addr, dest, sizeof(dest));
 	printf("~~~ %s:%i: ret: %li, from addr: %s\n", __func__, __LINE__, ret, dest);
 out:
 
@@ -1084,8 +1105,8 @@ static int sap_epoll_tx_handler(struct sap_ctx_dest *ctx_dest)
 //	struct sap_ctx *ctx;
 	printf("~~~ %s:%i: start\n", __func__, __LINE__);
 
-	if (ctx_dest->dest.ss_family == AF_INET6)
-		inet_ntop(ctx_dest->dest.ss_family, &((struct sockaddr_in6 *)&ctx_dest->dest)->sin6_addr, dest, sizeof(dest));
+	if (ctx_dest->dest.s.sa_family == AF_INET6)
+		inet_ntop(ctx_dest->dest.s.sa_family, &ctx_dest->dest.in6.sin6_addr, dest, sizeof(dest));
 
 	ret = read(ctx_dest->timer_fd, &res, sizeof(res));
 	printf("~~~ %s:%i: res: %lu, dest: %s\n", __func__, __LINE__, res, dest);
