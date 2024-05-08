@@ -1447,6 +1447,66 @@ out:
 	return 0;
 }
 
+static int sap_session_timeouted(struct sap_session_entry *session, struct timespec *now)
+{
+	int64_t diff;
+	struct timespec sum;
+	struct timespec add = {
+		.tv_sec = SAP_TIMEOUT_SEC,
+		.tv_nsec = 0,
+	};
+
+	sum = timespec_sum(session->last_seen, add);
+
+	diff = timespec_diffus(*now, sum);
+	if (diff < 0) {
+	printf("~~~ %s:%i: timeouted, going to delete\n", __func__, __LINE__);
+		return 1;
+	}
+
+	return 0;
+}
+
+static int sap_session_outcounted(struct sap_ctx *ctx, struct sap_session_entry *session)
+{
+	/* if we have a non-standard, lower interval, increase
+	 * the missed packet limit accordingly, to avoid
+	 * kicking out SAP announcers with a standard interval
+	 * too early
+	 * TODO: maybe try to estimate an SAP announcers interval?
+	 * (though there is no counter in the SAP announcement
+	 * packet unfortunately)
+	 */
+	int max_missed = SAP_TIMEOUT_TIMES;
+
+	if (ctx->interval < SAP_INTERVAL_SEC)
+		max_missed = max_missed * SAP_INTERVAL_SEC / ctx->interval;
+
+	if (session->missed >= max_missed) {
+	printf("~~~ %s:%i: missed %hu packets, going to delete\n", __func__, __LINE__, session->missed);
+		return 1;
+	}
+
+	return 0;
+}
+
+static void sap_sessions_timeout(struct sap_ctx_dest *ctx_dest)
+{
+	struct sap_session_entry *session;
+	struct hlist_node *tmp;
+	struct timespec now;
+
+	clock_gettime(CLOCK_MONOTONIC, &now);
+
+	hlist_for_each_entry_safe(session, tmp, &ctx_dest->sessions_list, node) {
+		if (sap_session_timeouted(session, &now) ||
+		    sap_session_outcounted(ctx_dest->ctx, session))
+			sap_session_del(ctx_dest, session);
+
+		session->missed++;
+	}
+}
+
 static int sap_epoll_tx_handler(struct sap_ctx_dest *ctx_dest)
 {
 	char dest[INET_ADDRSTRLEN];
@@ -1462,6 +1522,7 @@ static int sap_epoll_tx_handler(struct sap_ctx_dest *ctx_dest)
 	ret = read(ctx_dest->timer_fd, &res, sizeof(res));
 	printf("~~~ %s:%i: res: %lu, dest: %s\n", __func__, __LINE__, res, dest);
 
+	sap_sessions_timeout(ctx_dest);
 	sap_send(ctx_dest);
 	sap_set_timer_next(ctx_dest);
 
