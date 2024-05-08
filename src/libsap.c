@@ -466,6 +466,17 @@ static char *sap_push_payload(char *msg, const char *payload)
 	return msg + len;
 }
 
+static unsigned int sap_ip_hdrlen(union sap_sockaddr_union *addr)
+{
+	switch (addr->s.sa_family) {
+	case AF_INET:
+		return 20;
+	case AF_INET6:
+	default:
+		return 40;
+	}
+}
+
 static void sap_create_message(struct sap_ctx_dest *ctx_dest, const char *payload, const char *payload_type, int msg_type, uint16_t msg_id_hash)
 {
 	int sap_af = ctx_dest->dest.s.sa_family;
@@ -511,10 +522,12 @@ static void sap_create_message(struct sap_ctx_dest *ctx_dest, const char *payloa
 		free(ctx_dest->message);
 		ctx_dest->message = NULL;
 		len = 0;
+		return;
 	}
 
+	/* TODO: maybe also include the 20/40 bytes IPv4/IPv6 header? */
 	ctx_dest->msg_len = len;
-	ctx_dest->total_msg_lens += len;
+	ctx_dest->total_msg_lens += len + sap_ip_hdrlen(&ctx_dest->dest);
 	ctx_dest->num_sessions++;
 }
 
@@ -926,7 +939,8 @@ static unsigned int sap_get_interval(struct sap_ctx_dest *ctx_dest)
 	int offset;
 
 	bw_used = 8 * ctx_dest->total_msg_lens / ctx->bw_limit;
-	interval = SAP_MAX(ctx_dest->ctx->interval, bw_used) * 1000;
+	printf("~~~ %s:%i: : ctx->interval: %lu, bw_used: %lu, total: %zu, bw_limit: %lu\n", __func__, __LINE__, ctx->interval, bw_used, ctx_dest->total_msg_lens, ctx->bw_limit);
+	interval = SAP_MAX(ctx->interval, bw_used) * 1000;
 
 	if (ctx->no_jitter)
 		return interval;
@@ -1160,33 +1174,40 @@ static int sap_session_cmp(struct sap_session_entry *session, union sap_sockaddr
 {
 	int ret;
 
+	printf("~~~ %s:%i: start\n", __func__, __LINE__);
 	if (session->orig_src.s.sa_family < orig_src->s.sa_family)
 		return -1;
 	else if (session->orig_src.s.sa_family > orig_src->s.sa_family)
 		return 1;
 
+	printf("~~~ %s:%i: here\n", __func__, __LINE__);
 	ret = memcmp(&session->orig_src, orig_src, sizeof(*orig_src));
 	if (ret < 0)
 		return -1;
 	else if (ret > 0)
 		return 0;
 	
+	printf("~~~ %s:%i: here, session->msg_id_hash: %hu (0x%04x), msg_id_hash: %hu (0x%04x\n", __func__, __LINE__, session->msg_id_hash, session->msg_id_hash, msg_id_hash, msg_id_hash);
 	if (session->msg_id_hash < msg_id_hash)
 		return -1;
 	else if (session->msg_id_hash > msg_id_hash)
 		return 1;
 
+	printf("~~~ %s:%i: end\n", __func__, __LINE__);
 	return 0;
 }
 
 static struct sap_session_entry *
 sap_session_get(struct sap_ctx_dest *ctx_dest, union sap_sockaddr_union *orig_src, uint16_t msg_id_hash)
 {
+	char dest[INET6_ADDRSTRLEN];
 	struct sap_session_entry *session = NULL, *prev = NULL;
 	int ret;
 
 	hlist_for_each_entry(session, &ctx_dest->sessions_list, node) {
+	inet_ntop(AF_INET6, &session->orig_src.in6.sin6_addr, dest, sizeof(dest));
 		ret = sap_session_cmp(session, orig_src, msg_id_hash);
+	printf("~~~ %s:%i: checking with: %s, %i, %04x -> ret: %i\n", __func__, __LINE__, dest, session->orig_src.s.sa_family, msg_id_hash, ret);
 		/* found */
 		if (!ret)
 			return session;
@@ -1203,11 +1224,12 @@ sap_session_get(struct sap_ctx_dest *ctx_dest, union sap_sockaddr_union *orig_sr
 static struct sap_session_entry *
 sap_session_create(struct sap_ctx_dest *ctx_dest, union sap_sockaddr_union *orig_src, uint16_t msg_id_hash, ssize_t msg_len)
 {
+	unsigned short ip_hdrlen = sap_ip_hdrlen(orig_src);
 	struct sap_session_entry *session;
 	struct sap_session_entry prepare = {
 		.orig_src = *orig_src,
 		.msg_id_hash = msg_id_hash,
-		.msg_len = msg_len,
+		.msg_len = msg_len + ip_hdrlen,
 		.missed = 0,
 		.last_seen = { 0 },
 	};
@@ -1257,6 +1279,7 @@ sap_session_get_or_add(struct sap_ctx_dest *ctx_dest, union sap_sockaddr_union *
 		return NULL;
 	}
 
+	/* TODO: maybe also include the 20/40 bytes IPv4/IPv6 header? */
 	ctx_dest->total_msg_lens += new_session->msg_len;
 	ctx_dest->num_sessions++;
 

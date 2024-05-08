@@ -77,7 +77,7 @@ static void usage(char *prog)
 //	printf("    -m <bytes>                          Packet MTU (default: min(1000, iface-MTU))\n");
 }
 
-char *getopt_args_fmt = "46d:p:t:T:I:i:Jc:m:h";
+char *getopt_args_fmt = "46d:p:t:T:I:i:Jc:b:m:h";
 
 static unsigned int get_num_dests(int argc, char *argv[])
 {
