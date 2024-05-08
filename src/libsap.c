@@ -37,6 +37,8 @@
 	 == htonl (0xfe800000))
 #endif /* __GNUC__ */
 
+#define SAP_MAX(a, b)	((a) > (b) ? (a) : (b))
+
 #define BIT(n) (1 << n)
 #define SAP_FLAG_TYPE (BIT(2))
 #define SAP_FLAG_TERMINATE SAP_FLAG_TYPE
@@ -50,6 +52,8 @@
 
 #define SAP_TIMEOUT_TIMES 10
 #define SAP_TIMEOUT_SEC (60*60)
+/* bits/s: */
+#define SAP_BANDWIDTH_LIMIT 4000
 
 enum sap_msg_type {
 	SAP_ANNOUNCE = 0,
@@ -795,7 +799,8 @@ struct sap_ctx *sap_init_custom(
 	uint16_t *msg_id_hash,
 	unsigned int interval,
 	int no_jitter,
-	unsigned long count)
+	unsigned long count,
+	long bw_limit)
 {
 	//char dest[INET6_ADDRSTRLEN];
 	char *dest;
@@ -814,13 +819,23 @@ struct sap_ctx *sap_init_custom(
 	memset(ctx, 0, sizeof(*ctx));
 	INIT_HLIST_HEAD(&ctx->dest_list);
 	ctx->msg_type = msg_type;
-	ctx->interval = interval;
+	ctx->interval = interval ? interval : SAP_INTERVAL_SEC;
 	ctx->no_jitter = no_jitter;
 	ctx->count = count;
 	ctx->term = 0;
 	ctx->epoll_ctx_none = SAP_EPOLL_CTX_TYPE_NONE;
 	ctx->thread.tid = NULL;
 	ctx->thread.tid_store = 0;
+
+	/* disabled limit */
+	if (bw_limit < 0)
+		ctx->bw_limit = ULONG_MAX;
+	/* default limit */
+	else if (!bw_limit)
+		ctx->bw_limit = SAP_BANDWIDTH_LIMIT;
+	/* configured limit */
+	else
+		ctx->bw_limit = (unsigned long)bw_limit;
 
 	if (mtx_init(&ctx->thread.ctrl_lock, mtx_plain) == thrd_error)
 		goto err1;
@@ -889,7 +904,7 @@ err1:
 /* use this for fully RFC2974 compliant execution, e.g. for daemons */
 struct sap_ctx *sap_init(char *payload_filename)
 {
-	return sap_init_custom(NULL, AF_UNSPEC, payload_filename, NULL, -1, NULL, 0, 0, 0);
+	return sap_init_custom(NULL, AF_UNSPEC, payload_filename, NULL, -1, NULL, 0, 0, 0, 0);
 }
 
 void sap_free(struct sap_ctx *ctx)
@@ -902,13 +917,16 @@ void sap_free(struct sap_ctx *ctx)
 }
 
 /* in milliseconds */
-static unsigned int sap_get_interval(struct sap_ctx *ctx)
+static unsigned int sap_get_interval(struct sap_ctx_dest *ctx_dest)
 {
-	unsigned int interval = SAP_INTERVAL_SEC * 1000;
+//	unsigned int interval = SAP_INTERVAL_SEC * 1000;
+	struct sap_ctx *ctx = ctx_dest->ctx;
+	unsigned int interval;
+       	unsigned long bw_used;
 	int offset;
 
-	if (ctx->interval)
-		interval = ctx->interval * 1000;
+	bw_used = 8 * ctx_dest->total_msg_lens / ctx->bw_limit;
+	interval = SAP_MAX(ctx_dest->ctx->interval, bw_used) * 1000;
 
 	if (ctx->no_jitter)
 		return interval;
@@ -925,7 +943,7 @@ static unsigned int sap_get_interval(struct sap_ctx *ctx)
 }
 
 /* in milliseconds */
-static int sap_get_timeout(struct sap_ctx *ctx)
+/*static int sap_get_timeout(struct sap_ctx *ctx)
 {
 	struct timespec now;
 	int64_t diff;
@@ -938,7 +956,7 @@ static int sap_get_timeout(struct sap_ctx *ctx)
 		return 0;
 
 	return (diff > INT_MAX) ? INT_MAX : (int)diff;
-}
+}*/
 
 /*static void sap_set_timeout_next(struct sap_ctx *ctx)
 {
@@ -958,9 +976,9 @@ static void sap_set_timeout_now(struct sap_ctx *ctx)
 	clock_gettime(CLOCK_MONOTONIC, &ctx->epoll.epoll_timeout);
 }*/
 
-static struct itimerspec sap_get_timeout_next(struct sap_ctx *ctx)
+static struct itimerspec sap_get_timeout_next(struct sap_ctx_dest *ctx_dest)
 {
-	unsigned int interval = sap_get_interval(ctx);
+	unsigned int interval = sap_get_interval(ctx_dest);
 	struct itimerspec timer = {
 		.it_interval = 0,
 		.it_value = {
@@ -976,7 +994,7 @@ static void sap_set_timer_next(struct sap_ctx_dest *ctx_dest)
 {
 	struct itimerspec timer;
 
-	timer = sap_get_timeout_next(ctx_dest->ctx);
+	timer = sap_get_timeout_next(ctx_dest);
 	timerfd_settime(ctx_dest->timer_fd, 0, &timer, NULL);
 }
 

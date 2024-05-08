@@ -71,6 +71,7 @@ static void usage(char *prog)
 	printf("    -i <interval>                       Interval override in seconds (default: 300)\n");
 	printf("    -J                                  Disable interval jitter\n");
 	printf("    -c <count>                          Number of messages to send\n");
+	printf("    -b <bw-limit>                       Total bits/s for all sessions in an SAP group (default: 4000)\n");
 // TODOs:
 //	printf("    -D                                  Disable duplicate announcement check\n");
 //	printf("    -m <bytes>                          Packet MTU (default: min(1000, iface-MTU))\n");
@@ -96,7 +97,7 @@ static unsigned int get_num_dests(int argc, char *argv[])
 	return num_dests;
 }
 
-static void get_args(int argc, char *argv[], int *addr_family, char ***dests, unsigned int num_dests, char **payload_filename, char **payload_type, int *msg_type, uint16_t **p_msg_id_hash, unsigned int *interval, int *no_jitter, unsigned long *count)
+static void get_args(int argc, char *argv[], int *addr_family, char ***dests, unsigned int num_dests, char **payload_filename, char **payload_type, int *msg_type, uint16_t **p_msg_id_hash, unsigned int *interval, int *no_jitter, unsigned long *count, long *bw_limit)
 {
 	int msg_id_hash_found = 0;
 	int dests_idx = 0;
@@ -190,6 +191,14 @@ static void get_args(int argc, char *argv[], int *addr_family, char ***dests, un
 				exit(1);
 			}
 			break;
+		case 'b':
+			ret = strtoi_generic(optarg, bw_limit);
+			if (ret < 0) {
+				fprintf(stderr, "Error: invalid bandwidth limit '%s'\n\n", optarg);
+				usage(argv[0]);
+				exit(1);
+			}
+			break;
 		case 'm':
 			break;
 		case 'h':
@@ -223,11 +232,12 @@ int main(int argc, char *argv[])
 	unsigned int interval = 0;
 	int no_jitter = 0;
 	unsigned long count = 0;
+	long bw_limit = 0;
 
-	get_args(argc, argv, &addr_family, &dests, num_dests, &payload_filename, &payload_type, &msg_type, &p_msg_id_hash, &interval, &no_jitter, &count);
+	get_args(argc, argv, &addr_family, &dests, num_dests, &payload_filename, &payload_type, &msg_type, &p_msg_id_hash, &interval, &no_jitter, &count, &bw_limit);
 
 	ctx = sap_init_custom(dests, addr_family, payload_filename, payload_type,
-			      msg_type, p_msg_id_hash, interval, no_jitter, count);
+			      msg_type, p_msg_id_hash, interval, no_jitter, count, bw_limit);
 	if (!ctx) {
 		usage(argv[0]);
 		exit(1);

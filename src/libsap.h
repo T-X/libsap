@@ -35,6 +35,7 @@ struct sap_ctx {
 	unsigned int interval;
 	int no_jitter;
 	unsigned long count;
+	unsigned long bw_limit;
 	int term;
 	enum sap_epoll_ctx_type epoll_ctx_none;
 	struct {
@@ -62,7 +63,8 @@ struct sap_ctx *sap_init_custom(char *payload_dests[],
 				uint16_t *msg_id_hash,
 				unsigned int interval,
 				int no_jitter,
-				unsigned long count);
+				unsigned long count,
+				long bw_limit);
 struct sap_ctx *sap_init(char *payload_filename);
 
 int sap_run(struct sap_ctx *ctx);
