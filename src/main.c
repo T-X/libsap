@@ -237,12 +237,12 @@ int main(int argc, char *argv[])
 
 //	sap_run(&ctx);
 	printf("~~~ %s:%i: starting thread\n", __func__, __LINE__);
-	sap_start(ctx);
-//	sap_run(ctx);
+//	sap_start(ctx);
+	sap_run(ctx);
 //	printf("~~~ %s:%i: waiting 15 seconds\n", __func__, __LINE__);
-	sleep(300);
+//	sleep(300);
 //	printf("~~~ %s:%i: stopping thread\n", __func__, __LINE__);
-	sap_stop(ctx);
+//	sap_stop(ctx);
 //	printf("~~~ %s:%i: freeing thread\n", __func__, __LINE__);
 
 	sap_free(ctx);

@@ -38,11 +38,18 @@
 #endif /* __GNUC__ */
 
 #define BIT(n) (1 << n)
+#define SAP_FLAG_TYPE (BIT(2))
+#define SAP_FLAG_TERMINATE SAP_FLAG_TYPE
+#define SAP_FLAG_ADDRESS (BIT(4))
+#define SAP_FLAG_IPV6 SAP_FLAG_ADDRESS
+#define SAP_FLAG_VERSION (BIT(5))
 
 #define SAP_PORT 9875
 #define SAP_PAYLOAD_TYPE_SDP "application/sdp"
 #define SAP_INTERVAL_SEC 300
 
+#define SAP_TIMEOUT_TIMES 10
+#define SAP_TIMEOUT_SEC (60*60)
 
 enum sap_msg_type {
 	SAP_ANNOUNCE = 0,
@@ -61,17 +68,31 @@ union sap_sockaddr_union {
 	struct sockaddr s;
 };
 
+struct sap_session_entry {
+	const union sap_sockaddr_union orig_src;
+	const uint16_t msg_id_hash;
+	const size_t msg_len;
+	short missed;
+	struct timespec last_seen;
+	struct hlist_node node;
+};
+
 struct sap_ctx_dest {
 	struct sap_ctx *ctx;
-	enum sap_epoll_ctx_type epoll_ctx_rx;
 	enum sap_epoll_ctx_type epoll_ctx_tx;
-	int sd;
+	enum sap_epoll_ctx_type epoll_ctx_rx;
+	int sd_tx;
+	int sd_rx;
 	int timer_fd;
 	union sap_sockaddr_union dest;
 	union sap_sockaddr_union src;
 	char *message;
 	size_t msg_len;
 	struct hlist_node node;
+	size_t total_msg_lens;
+	size_t num_sessions;
+	/* TODO: maybe convert to hash map? */
+	struct hlist_head sessions_list;
 };
 
 #define sap_container_of(ptr, type, member) ((type *)((char *)(ptr) - offsetof(type, member)))
@@ -181,7 +202,8 @@ static int sap_set_hop_limit(int sd, union sap_sockaddr_union *sap_dst)
 	int hops = 255;
 	in_addr_t dst;
 
-	if (sap_dst->s.sa_family == AF_INET) {
+	switch (sap_dst->s.sa_family) {
+	case AF_INET:
 		dst = ntohl(sap_dst->in.sin_addr.s_addr);
 
 		if (IN_MC_LINK_LOCAL(dst))
@@ -189,7 +211,8 @@ static int sap_set_hop_limit(int sd, union sap_sockaddr_union *sap_dst)
 
 		return setsockopt(sd, IPPROTO_IP, IP_MULTICAST_TTL, &hops,
 				  sizeof(hops));
-	} else if (sap_dst->s.sa_family == AF_INET6) {
+	case AF_INET6:
+		/* hop_limit to 1 for link-local scope? */
 		return setsockopt(sd, IPPROTO_IPV6, IPV6_MULTICAST_HOPS, &hops,
 				  sizeof(hops));
 	}
@@ -216,8 +239,8 @@ printf("~~~ %s:%i: here, ai_family: %i, dest: %s, scope_id: %i\n", __func__, __L
 		.ipv6mr_interface = ctx_dest->dest.in6.sin6_scope_id,
 	};
 
-	ret = setsockopt(ctx_dest->sd, IPPROTO_IPV6, IPV6_JOIN_GROUP,
-			 &mreq, sizeof(mreq));
+	ret = setsockopt(ctx_dest->sd_rx, IPPROTO_IPV6, IPV6_JOIN_GROUP, &mreq,
+			 sizeof(mreq));
 
 	printf("~~~ %s:%i: ret: %i\n", __func__, __LINE__, ret);
 	return ret;
@@ -238,13 +261,74 @@ static int sap_join_dest(struct sap_ctx_dest *ctx_dest)
 	return -EINVAL;
 }
 
+static int sap_create_socket_tx(struct sap_ctx_dest *ctx_dest)
+{
+	union sap_sockaddr_union *sap_dst = &ctx_dest->dest;
+	socklen_t addr_len = sizeof(ctx_dest->src);
+	int sd, ret;
+
+	sd = socket(sap_dst->s.sa_family, SOCK_DGRAM, IPPROTO_UDP);
+	if (sd < 0)
+		return sd;
+
+	/* connect to SAP multicast destination; then we can use send() instead
+	 * of sendto() later, too */
+	ret = connect(sd, &sap_dst->s, sizeof(*sap_dst));
+	if (ret < 0)
+		goto err;
+
+	/* after connect(), will return the source address of TX packets */
+	ret = getsockname(sd, &ctx_dest->src.s, &addr_len);
+	if (ret < 0)
+		goto err;
+
+	ret = sap_set_hop_limit(sd, sap_dst);
+	if (ret < 0)
+		goto err;
+
+	ctx_dest->sd_tx = sd;
+	return sd;
+err:
+	close(sd);
+	return ret;
+}
+
+static int sap_create_socket_rx(struct sap_ctx_dest *ctx_dest)
+{
+	union sap_sockaddr_union listen = ctx_dest->dest;
+	int sd, ret;
+
+	sd = socket(listen.s.sa_family, SOCK_DGRAM, IPPROTO_UDP);
+	if (sd < 0)
+		return sd;
+
+	ret = setsockopt(sd, SOL_SOCKET, SO_REUSEADDR, &(int){1}, sizeof(int));
+	if (ret < 0)
+		goto err;
+
+	ret = bind(sd, &listen.s, sizeof(listen));
+	if (ret < 0)
+		goto err;
+
+	ctx_dest->sd_rx = sd;
+
+	ret = sap_join_dest(ctx_dest);
+	if (ret < 0)
+		goto err;
+
+	return 0;
+err:
+	close(sd);
+	return ret;
+}
+
 static int sap_create_socket(struct sap_ctx_dest *ctx_dest, char *pay_dst, int af_hint)
 {
 	char dest[INET6_ADDRSTRLEN];
 	union sap_sockaddr_union sap_dst = { 0 };
 	union sap_sockaddr_union ai_addr;
 	struct addrinfo hints, *servinfo, *p;
-	int ret, sd = -EINVAL;
+	int ret;
 
 	memset(&hints, 0, sizeof(hints));
 	hints.ai_family = af_hint;
@@ -252,7 +336,7 @@ static int sap_create_socket(struct sap_ctx_dest *ctx_dest, char *pay_dst, int a
 	hints.ai_protocol = IPPROTO_UDP;
 
 	if (!pay_dst)
-		return sd;
+		return -EINVAL;
 
 	/* resolve potential hostname to IP address */
 	/* TODO: 1) get/set payload port here instead of NULL? needed for SRV records?
@@ -260,6 +344,8 @@ static int sap_create_socket(struct sap_ctx_dest *ctx_dest, char *pay_dst, int a
 	ret = getaddrinfo(pay_dst, NULL, &hints, &servinfo);
 	if (ret < 0)
 		return ret;
+
+	ret = -EINVAL;
 
 	for (p = servinfo; p; p = p->ai_next) {
 		if (p->ai_addrlen > sizeof(ai_addr))
@@ -273,67 +359,26 @@ printf("~~~ %s:%i: here, ai_family: %i, ai_addr: %s\n", __func__, __LINE__, p->a
 		if (ret < 0)
 			break;
 
+		ctx_dest->dest = sap_dst;
+
 		if (p->ai_addr->sa_family != sap_dst.s.sa_family)
 			fprintf(stderr, "Error: address family was not copied? %i vs. %i\n", p->ai_addr->sa_family, sap_dst.s.sa_family);
+		ret = sap_create_socket_tx(ctx_dest);
+		if (ret < 0)
+			continue;
 
-printf("~~~ %s:%i: sap_dst.s.sa_family: %i, proto: %i\n", __func__, __LINE__, sap_dst.s.sa_family,IPPROTO_UDP);
-		sd = socket(sap_dst.s.sa_family, SOCK_DGRAM, IPPROTO_UDP);
-		if (sd >= 0)
-			break;
+		ret = sap_create_socket_rx(ctx_dest);
+		if (ret < 0) {
+			close(ctx_dest->sd_tx);
+			continue;
+		}
+
+		/* ok */
+		break;
+//printf("~~~ %s:%i: sap_dst.s.sa_family: %i, proto: %i\n", __func__, __LINE__, sap_dst.s.sa_family,IPPROTO_UDP);
 	}
 
-printf("~~~ %s:%i: sd: %i\n", __func__, __LINE__, sd);
-	if (sd < 0) {
-		ret = sd;
-		goto out;
-	}
-
-	ctx_dest->dest = sap_dst;
-	ctx_dest->sd = sd;
-
-printf("~~~ %s:%i: HEEERE\n", __func__, __LINE__);
-/*	ret = connect(sd, &sap_dst.s, sizeof(sap_dst));
-	if (ret < 0)
-		goto err;
-
-	struct sockaddr unconnect = { 0 };
-	unconnect.sa_family = AF_UNSPEC;
-
-	ret = connect(sd, &unconnect, sizeof(unconnect));
-	if (ret < 0)
-		goto err;*/
-
-printf("~~~ %s:%i: HEEERE2\n", __func__, __LINE__);
-/*	struct sockaddr_in6 listen = { 0 };
-	listen.sin6_family = AF_INET6;
-//	listen.sin6_port = ((struct sockaddr_in6 *)&sap_dst)->sin6_port;
-	listen.sin6_port = htons(SAP_PORT);
-	listen.sin6_addr = in6addr_any;
-	listen.sin6_scope_id = sap_dst.in6.sin6_scope_id;
-
-	ret = bind(sd, (const struct sockaddr *)&listen, sizeof(listen));
-	if (ret < 0)
-		goto err;*/
-
-printf("~~~ %s:%i: HEEERE3\n", __func__, __LINE__);
-	ret = connect(sd, (const struct sockaddr *)&sap_dst, sizeof(sap_dst));
-	if (ret < 0)
-		goto err;
-
-	ret = sap_set_hop_limit(sd, &sap_dst);
-	if (ret < 0)
-		goto err;
-
-	ret = sap_join_dest(ctx_dest);
-	if (ret < 0)
-		goto err;
-
-printf("~~~ %s:%i: HEEERE4\n", __func__, __LINE__);
-	return 0;
-
-err:
-	close(sd);
-out:
+//printf("~~~ %s:%i: sd: %i\n", __func__, __LINE__, sd);
 	freeaddrinfo(servinfo);
 	return ret;
 }
@@ -341,14 +386,14 @@ out:
 static uint8_t sap_get_flags(int sap_af, int msg_type)
 {
 	/* V=1: SAPv1/SAPv2 */
-	uint8_t flags = BIT(5);
+	uint8_t flags = SAP_FLAG_VERSION;
 
 	/* A: address type */
 	if (sap_af == AF_INET6)
-		flags |= BIT(4);
+		flags |= SAP_FLAG_IPV6;
 
 	if (msg_type == SAP_TERMINATE)
-		flags |= BIT(2);
+		flags |= SAP_FLAG_TERMINATE;
 
 	return flags;
 }
@@ -370,29 +415,19 @@ static uint16_t sap_get_msg_id_hash(struct sap_ctx *ctx, uint16_t *msg_id_hash)
 		return htons(*msg_id_hash);
 }
 
-static char *sap_push_orig_source(struct sap_ctx_dest *ctx_dest, char *msg, int sd)
+static char *sap_push_orig_source(struct sap_ctx_dest *ctx_dest, char *msg)
 {
-	/* FIXME? incorrect now, as we don't connect? */
-	union sap_sockaddr_union addr;
-	socklen_t len = sizeof(addr);
+	union sap_sockaddr_union *src = &ctx_dest->src;
 
-	if (sd < 0)
-		NULL;
-
-	getsockname(sd, &addr.s, &len);
-	ctx_dest->src = addr;
-
-	switch (addr.s.sa_family) {
+	switch (src->s.sa_family) {
 	case AF_INET:
 		struct in_addr *addr4 = (struct in_addr *)msg;
-		*addr4 = addr.in.sin_addr;
+		*addr4 = src->in.sin_addr;
 		return msg + sizeof(*addr4);
 	case AF_INET6:
 		struct in6_addr *addr6 = (struct in6_addr *)msg;
-		*addr6 = addr.in6.sin6_addr;
+		*addr6 = src->in6.sin6_addr;
 		return msg + sizeof(*addr6);
-	default:
-		return NULL;
 	}
 
 	return msg;
@@ -462,7 +497,7 @@ static void sap_create_message(struct sap_ctx_dest *ctx_dest, const char *payloa
 	memcpy(msg, &packet, sizeof(packet));
 	msg += sizeof(packet);
 
-	msg = sap_push_orig_source(ctx_dest, msg, ctx_dest->sd);
+	msg = sap_push_orig_source(ctx_dest, msg);
 	msg = sap_push_auth_data(msg);
 	msg = sap_push_payload_type(msg, payload_type);
 	msg = sap_push_payload(msg, payload);
@@ -475,12 +510,14 @@ static void sap_create_message(struct sap_ctx_dest *ctx_dest, const char *payloa
 	}
 
 	ctx_dest->msg_len = len;
+	ctx_dest->total_msg_lens += len;
+	ctx_dest->num_sessions++;
 }
 
 static int sap_send(struct sap_ctx_dest *ctx_dest)
 {
-	return sendto(ctx_dest->sd, ctx_dest->message, ctx_dest->msg_len, 0, (struct sockaddr *)&ctx_dest->dest, sizeof(ctx_dest->dest));
-//	return send(ctx_dest->sd, ctx_dest->message, ctx_dest->msg_len, 0);
+//	return sendto(ctx_dest->sd, ctx_dest->message, ctx_dest->msg_len, 0, (struct sockaddr *)&ctx_dest->dest, sizeof(ctx_dest->dest));
+	return send(ctx_dest->sd_tx, ctx_dest->message, ctx_dest->msg_len, 0);
 }
 
 static char *sap_get_payload(char *payload_filename)
@@ -654,9 +691,8 @@ static int sap_init_epoll(struct sap_ctx *ctx)
 	}
 
 	/* no action needed, only to wake up epoll_wait() to check ctx->term */
-	ctx->thread.epoll_ctx = SAP_EPOLL_CTX_TYPE_NONE;
 	ret = sap_init_add_epoll(ctx->thread.pipefd[0], ctx,
-				 &ctx->thread.epoll_ctx);
+				 &ctx->epoll_ctx_none);
 	if (ret < 0)
 		goto err3;
 
@@ -670,6 +706,36 @@ err1:
 	return ret;
 }
 
+static void sap_free_socket(struct sap_ctx_dest *ctx_dest)
+{
+	close(ctx_dest->sd_tx);
+	close(ctx_dest->sd_rx);
+}
+
+
+static int sap_init_ctx_dest_add_epoll(struct sap_ctx_dest *ctx_dest)
+{
+	int ret;
+
+	/* unused / should not receive anything */
+	ret = sap_init_add_epoll(ctx_dest->sd_tx, ctx_dest->ctx, &ctx_dest->ctx->epoll_ctx_none);
+	if (ret < 0)
+		return ret;
+
+	/* SAP packet reception */
+	ret = sap_init_add_epoll(ctx_dest->sd_rx, ctx_dest->ctx, &ctx_dest->epoll_ctx_rx);
+	if (ret < 0) {
+		return ret;
+	}
+
+	/* wake-up timer for SAP packet transmission */
+	ret = sap_init_add_epoll(ctx_dest->timer_fd, ctx_dest->ctx, &ctx_dest->epoll_ctx_tx);
+	if (ret < 0)
+		return ret;
+
+	return 0;
+}
+
 static struct sap_ctx_dest *sap_init_ctx_dest(struct sap_ctx *ctx, char *payload_dest, int payload_dest_af, char *payload_type, char *payload, int msg_type, uint16_t msg_id_hash)
 {
 	struct sap_ctx_dest *ctx_dest;
@@ -680,9 +746,13 @@ static struct sap_ctx_dest *sap_init_ctx_dest(struct sap_ctx *ctx, char *payload
 	if (!ctx_dest)
 		goto err1;
 
+	memset(ctx_dest, 0, sizeof(*ctx_dest));
+	INIT_HLIST_HEAD(&ctx_dest->sessions_list);
 	ctx_dest->ctx = ctx;
 	ctx_dest->epoll_ctx_rx = SAP_EPOLL_CTX_TYPE_RX;
 	ctx_dest->epoll_ctx_tx = SAP_EPOLL_CTX_TYPE_TX;
+	ctx_dest->total_msg_lens = 0;
+	ctx_dest->num_sessions = 0;
 
 	ctx_dest->timer_fd = timerfd_create(CLOCK_MONOTONIC, O_NONBLOCK);
 	if (ctx_dest->timer_fd < 0)
@@ -698,7 +768,7 @@ static struct sap_ctx_dest *sap_init_ctx_dest(struct sap_ctx *ctx, char *payload
 	if (!ctx_dest->message)
 		goto err4;
 
-	ret = sap_init_add_epoll(ctx_dest->timer_fd, ctx, &ctx_dest->epoll_ctx_tx);
+	ret = sap_init_ctx_dest_add_epoll(ctx_dest);
 	if (ret < 0)
 		goto err5;
 
@@ -706,7 +776,7 @@ static struct sap_ctx_dest *sap_init_ctx_dest(struct sap_ctx *ctx, char *payload
 err5:
 	free(ctx_dest->message);
 err4:
-	close(ctx_dest->sd);
+	sap_free_socket(ctx_dest);
 err3:
 	close(ctx_dest->timer_fd);
 err2:
@@ -714,17 +784,6 @@ err2:
 err1:
 	return NULL;
 }
-
-static int sap_init_add_ctx_dest(struct sap_ctx_dest *ctx_dest, struct sap_ctx *ctx)
-{	
-	// ToDo: check duplicates
-
-	printf("~~~ %s:%i\n", __func__, __LINE__);
-	hlist_add_head(&ctx_dest->node, &ctx->dest_list);
-
-	return sap_init_add_epoll(ctx_dest->sd, ctx, &ctx_dest->epoll_ctx_rx);
-}
-
 
 /* use this if you need full, customized control, e.g. for debugging (tools) */
 struct sap_ctx *sap_init_custom(
@@ -754,12 +813,12 @@ struct sap_ctx *sap_init_custom(
 
 	memset(ctx, 0, sizeof(*ctx));
 	INIT_HLIST_HEAD(&ctx->dest_list);
-	//ctx->sd = -1;
 	ctx->msg_type = msg_type;
 	ctx->interval = interval;
 	ctx->no_jitter = no_jitter;
 	ctx->count = count;
 	ctx->term = 0;
+	ctx->epoll_ctx_none = SAP_EPOLL_CTX_TYPE_NONE;
 	ctx->thread.tid = NULL;
 	ctx->thread.tid_store = 0;
 
@@ -808,11 +867,7 @@ struct sap_ctx *sap_init_custom(
 		if (!ctx_dest)
 			goto err5;
 
-		ret = sap_init_add_ctx_dest(ctx_dest, ctx);
-		if (ret < 0) {
-			free(ctx_dest);
-			goto err5;
-		}
+		hlist_add_head(&ctx_dest->node, &ctx->dest_list);
 	}
 
 	free(payload);
@@ -961,10 +1016,10 @@ static void sap_set_msg_type(struct sap_ctx_dest *ctx_dest, int msg_type)
 
 	/* SAP_TERMINATE */
 	if (msg_type)
-		packet->flags |= BIT(2);
+		packet->flags |= SAP_FLAG_TYPE;
 	/* SAP_ANNOUNCE */
 	else
-		packet->flags &= ~BIT(2);
+		packet->flags &= ~SAP_FLAG_TYPE;
 }
 
 /*void sap_msleep(struct sap_ctx *ctx, unsigned int msecs)
@@ -1006,11 +1061,14 @@ static int sap_is_my_source(struct sap_ctx_dest *ctx_dest, union sap_sockaddr_un
 	union sap_sockaddr_union *src = &ctx_dest->src;
 	struct in6_addr *ip6;
 
-	printf("~~~ %s:%i: start, af1: %i, af2: %i\n", __func__, __LINE__, src->s.sa_family, addr->s.sa_family);
+	/* TODO: maybe check for our other SAP destinations, too,
+	 * maybe this looped back? */
+
+//	printf("~~~ %s:%i: start, af1: %i, af2: %i\n", __func__, __LINE__, src->s.sa_family, addr->s.sa_family);
 	if (src->s.sa_family != addr->s.sa_family)
 		return 0;
 
-	printf("~~~ %s:%i: start\n", __func__, __LINE__);
+//	printf("~~~ %s:%i: start\n", __func__, __LINE__);
 	switch (src->s.sa_family) {
 	case AF_INET:
 		return !memcmp(&src->in.sin_addr,
@@ -1018,61 +1076,314 @@ static int sap_is_my_source(struct sap_ctx_dest *ctx_dest, union sap_sockaddr_un
 			       sizeof(src->in.sin_addr));
 	case AF_INET6:
 
-	ip6 = &src->in6.sin6_addr;
+/*	ip6 = &src->in6.sin6_addr;
 	printf("~~~ %s:%i: addr: %08x%08x%08x%08x\n", __func__, __LINE__,
 			ntohl(ip6->s6_addr32[0]),
 			ntohl(ip6->s6_addr32[1]),
 			ntohl(ip6->s6_addr32[2]),
 			ntohl(ip6->s6_addr32[3])
-			);
+			);*/
 
 
-	printf("~~~ %s:%i: start\n", __func__, __LINE__);
+//	printf("~~~ %s:%i: start\n", __func__, __LINE__);
 		return !memcmp(&src->in6.sin6_addr,
 			       &addr->in6.sin6_addr,
 			       sizeof(src->in6.sin6_addr));
 	}
 
-	printf("~~~ %s:%i: start\n", __func__, __LINE__);
+//	printf("~~~ %s:%i: start\n", __func__, __LINE__);
+	return 0;
+}
+
+static int sap_get_orig_source(char *buffer, int buf_len, union sap_sockaddr_union *orig_src)
+{
+	struct sap_packet *packet = (struct sap_packet *)buffer;
+
+	if (packet->flags & SAP_FLAG_IPV6) {
+		struct in6_addr *addr6 = (struct in6_addr *)(buffer +
+							     sizeof(*packet));
+
+		if (buf_len < sizeof(*packet) + sizeof(struct in6_addr))
+			return -EINVAL;
+
+		orig_src->in6.sin6_family = AF_INET6;
+		orig_src->in6.sin6_addr = *addr6;
+	} else {
+		struct in_addr *addr4 = (struct in_addr *)(buffer +
+							   sizeof(*packet));
+
+		if (buf_len < sizeof(*packet) + sizeof(struct in_addr))
+			return -EINVAL;
+
+		orig_src->in.sin_family = AF_INET;
+		orig_src->in.sin_addr = *addr4;
+	}
+
+	return 0;
+}
+
+static int sap_is_zero_address(union sap_sockaddr_union *addr)
+{
+	union sap_sockaddr_union zero = { 0 };
+
+	switch(addr->s.sa_family) {
+	case AF_INET6:
+		return !memcmp(&addr->in6.sin6_addr, &zero.in6.sin6_addr,
+			       sizeof(zero.in6.sin6_addr));
+	case AF_INET:
+		return !memcmp(&addr->in.sin_addr, &zero.in.sin_addr,
+			       sizeof(zero.in.sin_addr));
+	}
+
+	return 0;
+}
+
+static int sap_session_cmp(struct sap_session_entry *session, union sap_sockaddr_union *orig_src, uint16_t msg_id_hash)
+{
+	int ret;
+
+	if (session->orig_src.s.sa_family < orig_src->s.sa_family)
+		return -1;
+	else if (session->orig_src.s.sa_family > orig_src->s.sa_family)
+		return 1;
+
+	ret = memcmp(&session->orig_src, orig_src, sizeof(*orig_src));
+	if (ret < 0)
+		return -1;
+	else if (ret > 0)
+		return 0;
+	
+	if (session->msg_id_hash < msg_id_hash)
+		return -1;
+	else if (session->msg_id_hash > msg_id_hash)
+		return 1;
+
+	return 0;
+}
+
+static struct sap_session_entry *
+sap_session_get(struct sap_ctx_dest *ctx_dest, union sap_sockaddr_union *orig_src, uint16_t msg_id_hash)
+{
+	struct sap_session_entry *session = NULL, *prev = NULL;
+	int ret;
+
+	hlist_for_each_entry(session, &ctx_dest->sessions_list, node) {
+		ret = sap_session_cmp(session, orig_src, msg_id_hash);
+		/* found */
+		if (!ret)
+			return session;
+
+		if (ret > 0)
+			return prev;
+
+		prev = session;
+	}
+
+	return session;
+}
+
+static struct sap_session_entry *
+sap_session_create(struct sap_ctx_dest *ctx_dest, union sap_sockaddr_union *orig_src, uint16_t msg_id_hash, ssize_t msg_len)
+{
+	struct sap_session_entry *session;
+	struct sap_session_entry prepare = {
+		.orig_src = *orig_src,
+		.msg_id_hash = msg_id_hash,
+		.msg_len = msg_len,
+		.missed = 0,
+		.last_seen = { 0 },
+	};
+
+	session = malloc(sizeof(*session));
+	if (!session)
+		return NULL;
+
+	memcpy(session, &prepare, sizeof(*session));
+	return session;
+}
+
+static struct sap_session_entry *
+sap_session_get_or_add(struct sap_ctx_dest *ctx_dest, union sap_sockaddr_union *orig_src, uint16_t msg_id_hash, ssize_t msg_len)
+{
+	char dest[INET6_ADDRSTRLEN];
+	struct sap_session_entry *session = sap_session_get(ctx_dest, orig_src, msg_id_hash);
+	struct sap_session_entry *new_session;
+	int ret;
+
+	inet_ntop(AF_INET6, &orig_src->in6.sin6_addr, dest, sizeof(dest));
+	printf("~~~ %s:%i: searching: %s, %i, %04x\n", __func__, __LINE__, dest, orig_src->s.sa_family, msg_id_hash);
+
+	/* found */
+//	if (session && !sap_session_cmp(session, orig_src, msg_id_hash))
+	if (session) {
+	      	ret = sap_session_cmp(session, orig_src, msg_id_hash);
+		if (!ret)
+			return session;
+	}
+
+	if (!session)
+		printf("~~~ %s:%i: no session found!\n", __func__, __LINE__);
+	else {
+		inet_ntop(AF_INET6, &session->orig_src.in6.sin6_addr, dest, sizeof(dest));
+		printf("~~~ %s:%i: session found, but not equal (%i): %s, %i, %04x\n", __func__, __LINE__, ret, dest, session->orig_src.s.sa_family, session->msg_id_hash);
+	}
+
+	new_session = sap_session_create(ctx_dest, orig_src, msg_id_hash, msg_len);
+	if (!new_session)
+		return NULL;
+
+	/* check for overflows */
+	if (ctx_dest->total_msg_lens + msg_len < ctx_dest->total_msg_lens ||
+	    ctx_dest->num_sessions + 1 < ctx_dest->num_sessions) {
+		free(new_session);
+		return NULL;
+	}
+
+	ctx_dest->total_msg_lens += new_session->msg_len;
+	ctx_dest->num_sessions++;
+
+	if (!session)
+		hlist_add_head(&new_session->node, &ctx_dest->sessions_list);
+	else
+		hlist_add_behind(&new_session->node, &session->node);
+
+	return new_session;
+}
+
+static int sap_session_del(struct sap_ctx_dest *ctx_dest, struct sap_session_entry *session)
+{
+	int ret = -EPROTO;
+
+	/* assertions, should not happen */
+	if (ctx_dest->num_sessions <= 1 ||
+	    ctx_dest->total_msg_lens <= session->msg_len)
+		goto err;
+
+	ret = 0;
+	ctx_dest->num_sessions--;
+	ctx_dest->total_msg_lens -= session->msg_len;
+err:
+	hlist_del(&session->node);
+	free(session);
+	return ret;
+
+}
+
+static int sap_session_terminate(struct sap_ctx_dest *ctx_dest, union sap_sockaddr_union *orig_src, uint16_t msg_id_hash)
+{
+	struct sap_session_entry *session = sap_session_get(ctx_dest, orig_src, msg_id_hash);
+
+	/* ignore unknown SAP terminations, maybe we just started */
+	if (!session) {
+		printf("~~~ %s:%i: can't terminate unknown session\n", __func__, __LINE__);
+		return 0;
+	}
+
+	return sap_session_del(ctx_dest, session);
+}
+
+static int sap_session_update(struct sap_ctx_dest *ctx_dest, union sap_sockaddr_union *orig_src, uint16_t msg_id_hash, ssize_t msg_len)
+{
+	struct sap_session_entry *session;
+       
+	session = sap_session_get_or_add(ctx_dest, orig_src, msg_id_hash, msg_len);
+	if (!session)
+		return -ENOMEM;
+
+	session->missed = 0;
+	clock_gettime(CLOCK_MONOTONIC, &session->last_seen);
 	return 0;
 }
 
 static int sap_epoll_rx_handler(struct sap_ctx_dest *ctx_dest)
 {
-	char buffer[2048];
+	char buffer[sizeof(struct sap_packet) + sizeof(struct in6_addr)];
+//	char *buffer;
+	struct sap_packet *packet;
 	unsigned int buf_len = sizeof(buffer);
-	union sap_sockaddr_union addr = { 0 };
-	union sap_sockaddr_union zero = { 0 };
-	struct in6_addr *ip6;
+	union sap_sockaddr_union src = { 0 };
+	union sap_sockaddr_union orig_src;
+//	union sap_sockaddr_union zero = { 0 };
+//	struct in6_addr *ip6;
 	char dest[INET6_ADDRSTRLEN];
-	socklen_t addr_len = sizeof(addr);
-	ssize_t ret;
+	socklen_t addr_len = sizeof(src);
+	ssize_t msg_len, ret;
 	int flags = 0;
 
-	printf("~~~ %s:%i: start\n", __func__, __LINE__);
+//	printf("~~~ %s:%i: start\n", __func__, __LINE__);
+	printf("~~~ %s:%i: old: total_msg_lens: %lu, num_sessions: %lu\n", __func__, __LINE__, ctx_dest->total_msg_lens, ctx_dest->num_sessions);
 //	ret = recvfrom(ctx_dest->sd, NULL, 0, MSG_PEEK | MSG_TRUNC;
 //	recv(ctx_dest->sd, NULL, 0, MSG_TRUNC);
-	ret = recvfrom(ctx_dest->sd, buffer, 0, MSG_PEEK | MSG_TRUNC, (struct sockaddr *)&addr, &addr_len);
-	if (ret < 0)
-		return ret;
 
-	if (sap_is_my_source(ctx_dest, &addr)) {
-	printf("~~~ %s:%i: got own source\n", __func__, __LINE__);
-		buf_len = 0;
-		flags = MSG_TRUNC;
+	ret = recvfrom(ctx_dest->sd_rx, buffer, sizeof(buffer), MSG_PEEK, &src.s, &addr_len);
+	if (ret < sizeof(*packet))
+		goto out;
+
+	if (sap_is_my_source(ctx_dest, &src)) {
+	printf("~~~ %s:%i: got own IP source\n", __func__, __LINE__);
+		goto out;
 	}
 
-	ret = recv(ctx_dest->sd, buffer, buf_len, flags);
+	packet = (struct sap_packet *)buffer;
+
+	/* RFC2974 says:
+	 * "SAP listeners MAY silently discard messages if the message
+	 *  identifier hash is set to zero."
+	 * Let's do this, as we don't check the payload for unique sessions.
+	 */
+	if (!ntohs(packet->msg_id_hash))
+		goto out;
+
+	ret = sap_get_orig_source(buffer, ret, &orig_src);
+	if (ret < 0)
+		goto out;
+
+	if (sap_is_my_source(ctx_dest, &orig_src)) {
+	printf("~~~ %s:%i: got own SAP orig source\n", __func__, __LINE__);
+		goto out;
+	}
+
+	/* RFC2974 says:
+	 * "SAP listeners MAY silently discard packets with the originating
+	 *  source set to zero."
+	 */
+	if (sap_is_zero_address(&orig_src)) {
+	printf("~~~ %s:%i: got zero SAP orig source\n", __func__, __LINE__);
+		goto out;
+	}
+
+//	ret = recv(ctx_dest->sd_rx, buffer, addr_len, 0);
+//	if (ret < 0
+
+	printf("~~~ %s:%i: got foreign SAP!\n", __func__, __LINE__);
+	msg_len = recv(ctx_dest->sd_rx, buffer, 0, MSG_PEEK | MSG_TRUNC);
+	if (msg_len < sizeof(*packet))
+		goto out;
+
+	if (packet->flags & SAP_FLAG_TERMINATE)
+		ret = sap_session_terminate(ctx_dest, &orig_src, ntohs(packet->msg_id_hash));
+	else
+		ret = sap_session_update(ctx_dest, &orig_src, ntohs(packet->msg_id_hash), msg_len);
+
+	if (ret < 0)
+		goto out;
+
+	printf("~~~ %s:%i: new: total_msg_lens: %lu, num_sessions: %lu\n", __func__, __LINE__, ctx_dest->total_msg_lens, ctx_dest->num_sessions);
+
+	ret = 0;
+out:
+	/* flush */
+	ret = recv(ctx_dest->sd_rx, buffer, 0, 0);
 	if (ret < 0)
 		return ret;
 
 //	ret = recv(ctx_dest->sd, NULL, 0, MSG_TRUNC);
-	inet_ntop(addr.s.sa_family, &addr.in6.sin6_addr, dest, sizeof(dest));
+/*	inet_ntop(addr.s.sa_family, &addr.in6.sin6_addr, dest, sizeof(dest));
 	printf("~~~ %s:%i: ret: %li, from addr: %s, af: %i, zero-addr: %s\n", __func__, __LINE__, ret, dest, addr.s.sa_family,
 			!memcmp(&addr.in6.sin6_addr, &zero.in6.sin6_addr,
 				sizeof(addr.in6.sin6_addr)) ? "yes" : "no");
 
-	ip6 = &((struct sockaddr_in6 *)&addr)->sin6_addr;
+	ip6 = &addr.in6.sin6_addr;
 	printf("~~~ %s:%i: addr: %08x%08x%08x%08x\n", __func__, __LINE__,
 			ntohl(ip6->s6_addr32[0]),
 			ntohl(ip6->s6_addr32[1]),
@@ -1080,7 +1391,7 @@ static int sap_epoll_rx_handler(struct sap_ctx_dest *ctx_dest)
 			ntohl(ip6->s6_addr32[3])
 			);
 
-	printf("~~~ %s:%i: start, addrlen(new): %li, addrlen(old): %li\n", __func__, __LINE__, addr_len, sizeof(addr));
+	printf("~~~ %s:%i: start, addrlen(new): %li, addrlen(old): %li\n", __func__, __LINE__, addr_len, sizeof(addr));*/
 //	sap_cmp_addr(&addr, &ctx_dest->dest);
 //	if (memcmp(&addr, &ctx_dest->dest, sizeof(addr))) {
 //	if (!sap_cmp_addr(&addr, &ctx_dest->dest)) {
@@ -1089,9 +1400,8 @@ static int sap_epoll_rx_handler(struct sap_ctx_dest *ctx_dest)
 //	}
 
 
-	inet_ntop(addr.s.sa_family, &addr.in6.sin6_addr, dest, sizeof(dest));
-	printf("~~~ %s:%i: ret: %li, from addr: %s\n", __func__, __LINE__, ret, dest);
-out:
+//	inet_ntop(addr.s.sa_family, &addr.in6.sin6_addr, dest, sizeof(dest));
+//	printf("~~~ %s:%i: ret: %li, from addr: %s\n", __func__, __LINE__, ret, dest);
 
 	return 0;
 }
@@ -1135,6 +1445,25 @@ static int sap_epoll_event_handler(struct epoll_event *event)
 	}
 
 	return -EINVAL;
+}
+
+static int sap_terminate_dest(struct sap_ctx_dest *ctx_dest)
+{
+	sap_set_msg_type(ctx_dest, SAP_TERMINATE);
+	/* TODO: update payload, RFC2974, section 6:
+	 * "If the payload format is `application/sdp'
+	 *  the deletion message is a single SDP line consisting of the origin
+	 *  field of the announcement to be deleted."
+	 */
+	return sap_send(ctx_dest);
+}
+
+static void sap_terminate_all(struct sap_ctx *ctx)
+{
+	struct sap_ctx_dest *ctx_dest;
+
+	hlist_for_each_entry(ctx_dest, &ctx->dest_list, node)
+		sap_terminate_dest(ctx_dest);
 }
 
 int sap_run(struct sap_ctx *ctx)
@@ -1231,16 +1560,8 @@ int sap_run(struct sap_ctx *ctx)
 	}
 
 //	printf("~~~ %s:%i: term=1, getting out\n", __func__, __LINE__);
-//	if (ctx->msg_type < 0) {
-//		sap_set_msg_type(ctx, SAP_TERMINATE);
-		/* TODO: update payload, RFC2974, section 6:
-		 * "If the payload format is `application/sdp'
-		 *  the deletion message is a single SDP line consisting of the origin
-		 *  field of the announcement to be deleted."
-		 */
-//		ret = sap_send(ctx);
-//		goto out;
-//	}
+	if (ctx->msg_type < 0)
+		sap_terminate_all(ctx);
 
 	ret = 0;
 out:

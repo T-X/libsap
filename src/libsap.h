@@ -36,6 +36,7 @@ struct sap_ctx {
 	int no_jitter;
 	unsigned long count;
 	int term;
+	enum sap_epoll_ctx_type epoll_ctx_none;
 	struct {
 		struct random_data rd;
 		char rs[256];
@@ -50,7 +51,6 @@ struct sap_ctx {
 		thrd_t tid_store;
 		mtx_t ctrl_lock;
 		int pipefd[2];
-		enum sap_epoll_ctx_type epoll_ctx;
 	} thread;
 };
 
