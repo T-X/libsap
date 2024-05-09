@@ -686,7 +686,7 @@ static char **sap_get_payload_dests(const char *payload)
 		ret = sap_get_payload_dest(payload, dest, &payload);
 		/* sanity check, should not happen */
 		if (ret < 0)
-			break;
+			goto err;
 	printf("~~~ %s:%i: got dest: %s\n", __func__, __LINE__, dest);
 	}
 
