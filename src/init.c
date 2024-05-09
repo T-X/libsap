@@ -867,7 +867,6 @@ struct sap_ctx *sap_init_custom(
 	}
 
 	printf("~~~ %s:%i: here\n", __func__, __LINE__);
-	//sap_init_for_each_payload_dest(dest, payload_dests) {
 	for (i = 0, dest = payload_dests[i]; dest; dest = payload_dests[++i]) {
 	printf("~~~ %s:%i: here\n", __func__, __LINE__);
 		ctx_dest = sap_init_ctx_dest(ctx, dest, payload_dest_af, payload_type, payload, msg_type, msg_id);

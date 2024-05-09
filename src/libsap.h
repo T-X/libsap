@@ -13,21 +13,11 @@
 
 #define SAP_EPOLL_MAX_EVENTS 32
 
-//struct sap_epoll_ctx {
-//	enum sap_epoll_data_type type;
-//	void *ctx;
-//};
-
 enum sap_epoll_ctx_type {
 	SAP_EPOLL_CTX_TYPE_NONE = 0,
 	SAP_EPOLL_CTX_TYPE_RX,
 	SAP_EPOLL_CTX_TYPE_TX,
 };
-
-/*struct sap_epoll_ctx_fd {
-	enum sap_epoll_ctx_type type;
-	int fd;
-}*/
 
 struct sap_ctx {
 	struct hlist_head dest_list;
