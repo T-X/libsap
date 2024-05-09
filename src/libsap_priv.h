@@ -92,14 +92,14 @@ struct sap_ctx_dest {
 	struct hlist_head sessions_list;
 };
 
-static inline unsigned int sap_ip_hdrlen(union sap_sockaddr_union *addr)
+static inline unsigned int sap_ipeth_hdrlen(union sap_sockaddr_union *addr)
 {
 	switch (addr->s.sa_family) {
 	case AF_INET:
-		return 20;
+		return 20 + 14;
 	case AF_INET6:
 	default:
-		return 40;
+		return 40 + 14;
 	}
 }
 

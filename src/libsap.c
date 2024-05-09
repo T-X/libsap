@@ -241,12 +241,12 @@ sap_session_get(struct sap_ctx_dest *ctx_dest, union sap_sockaddr_union *orig_sr
 static struct sap_session_entry *
 sap_session_create(struct sap_ctx_dest *ctx_dest, union sap_sockaddr_union *orig_src, uint16_t msg_id_hash, ssize_t msg_len)
 {
-	unsigned short ip_hdrlen = sap_ip_hdrlen(orig_src);
+	unsigned short ipeth_hdrlen = sap_ipeth_hdrlen(orig_src);
 	struct sap_session_entry *session;
 	struct sap_session_entry prepare = {
 		.orig_src = *orig_src,
 		.msg_id_hash = msg_id_hash,
-		.msg_len = msg_len + ip_hdrlen,
+		.msg_len = msg_len + ipeth_hdrlen,
 		.missed = 0,
 		.last_seen = { 0 },
 	};
@@ -295,7 +295,6 @@ sap_session_get_or_add(struct sap_ctx_dest *ctx_dest, union sap_sockaddr_union *
 		return NULL;
 	}
 
-	/* TODO: maybe also include the 20/40 bytes IPv4/IPv6 header? */
 	ctx_dest->total_msg_lens += new_session->msg_len;
 	ctx_dest->num_sessions++;
 

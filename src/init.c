@@ -710,9 +710,8 @@ static void sap_create_message(struct sap_ctx_dest *ctx_dest, const char *payloa
 		return;
 	}
 
-	/* TODO: maybe also include the 20/40 bytes IPv4/IPv6 header? */
 	ctx_dest->msg_len = len;
-	ctx_dest->total_msg_lens += len + sap_ip_hdrlen(&ctx_dest->dest);
+	ctx_dest->total_msg_lens += len + sap_ipeth_hdrlen(&ctx_dest->dest);
 	ctx_dest->num_sessions++;
 }
 
