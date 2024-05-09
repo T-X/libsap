@@ -16,6 +16,17 @@
 #include "libsap.h"
 #include "libsap_priv.h"
 
+#ifdef __STDC_NO_THREADS__
+#error I need threads to build this program!
+#endif
+
+#ifndef __GNUC__
+#define IN6_IS_ADDR_MULTICAST(a) (((const uint8_t *) (a))[0] == 0xff)
+#define IN6_IS_ADDR_LINKLOCAL(a) \
+	((((const uint32_t *) (a))[0] & htonl (0xffc00000))		\
+	 == htonl (0xfe800000))
+#endif /* __GNUC__ */
+
 #define IN_MC_LINK_LOCAL(a) ((((in_addr_t)(a)) & 0xffffff00) == 0xe0000000)
 #define IN_MC_LOCAL(a) ((((in_addr_t)(a)) & 0xffff0000) == 0xefff0000)
 #define IN_MC_ORG_LOCAL(a) ((((in_addr_t)(a)) & 0xfffc0000) == 0xefc00000)

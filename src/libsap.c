@@ -27,13 +27,6 @@
 #error I need threads to build this program!
 #endif
 
-#ifndef __GNUC__
-#define IN6_IS_ADDR_MULTICAST(a) (((const uint8_t *) (a))[0] == 0xff)
-#define IN6_IS_ADDR_LINKLOCAL(a) \
-	((((const uint32_t *) (a))[0] & htonl (0xffc00000))		\
-	 == htonl (0xfe800000))
-#endif /* __GNUC__ */
-
 #define SAP_MAX(a, b)	((a) > (b) ? (a) : (b))
 
 #define SAP_TIMEOUT_TIMES 10
