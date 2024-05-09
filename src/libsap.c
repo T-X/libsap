@@ -488,8 +488,14 @@ static void sap_sessions_timeout(struct sap_ctx_dest *ctx_dest)
 	}
 }
 
+static int sap_count_reached(struct sap_ctx *ctx)
+{
+	return ctx->count_max && ctx->count >= ctx->count_max;
+}
+
 static int sap_epoll_tx_handler(struct sap_ctx_dest *ctx_dest)
 {
+	struct sap_ctx *ctx = ctx_dest->ctx;
 	char dest[INET_ADDRSTRLEN];
 	uint64_t res;
 	int ret;
@@ -503,8 +509,20 @@ static int sap_epoll_tx_handler(struct sap_ctx_dest *ctx_dest)
 	printf("~~~ %s:%i: res: %lu, dest: %s\n", __func__, __LINE__, res, dest);
 
 	sap_sessions_timeout(ctx_dest);
+
+	if (sap_count_reached(ctx)) {
+		ctx->term = 1;
+		return 0;
+	}
+
 	sap_send(ctx_dest);
+	ctx_dest->ctx->count++;
 	sap_set_timer_next(ctx_dest);
+
+	/* don't wait for another interval if we have an explicit
+	 * message type -> "debug mode" */
+	if (ctx->msg_type >= 0 && sap_count_reached(ctx))
+		ctx->term = 1;
 
 	return 0;
 }

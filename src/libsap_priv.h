@@ -50,10 +50,12 @@ enum sap_epoll_ctx_type {
 
 struct sap_ctx {
 	struct hlist_head dest_list;
+	unsigned int num_dests;
 	int msg_type;
 	unsigned int interval;
 	int no_jitter;
 	unsigned long count;
+	unsigned long count_max;
 	unsigned long bw_limit;
 	int term;
 	enum sap_epoll_ctx_type epoll_ctx_none;

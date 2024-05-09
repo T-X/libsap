@@ -817,10 +817,12 @@ struct sap_ctx *sap_init_custom(
 
 	memset(ctx, 0, sizeof(*ctx));
 	INIT_HLIST_HEAD(&ctx->dest_list);
+	ctx->num_dests = 0;
 	ctx->msg_type = msg_type;
 	ctx->interval = interval ? interval : SAP_INTERVAL_SEC;
 	ctx->no_jitter = no_jitter;
-	ctx->count = count;
+	ctx->count = 0;
+	ctx->count_max = count;
 	ctx->term = 0;
 	ctx->epoll_ctx_none = SAP_EPOLL_CTX_TYPE_NONE;
 	ctx->thread.tid = NULL;
@@ -864,7 +866,6 @@ struct sap_ctx *sap_init_custom(
 		goto err2;
 	}
 
-//ToDo:
 	if (!payload_dests && !strcmp(payload_type, SAP_PAYLOAD_TYPE_SDP)) {
 		payload_dests_tmp = sap_get_payload_dests(payload);
 		payload_dests = payload_dests_tmp;
@@ -884,7 +885,10 @@ struct sap_ctx *sap_init_custom(
 			goto err5;
 
 		hlist_add_head(&ctx_dest->node, &ctx->dest_list);
+		ctx->num_dests++;
 	}
+
+	ctx->count_max *= ctx->num_dests;
 
 	free(payload_dests_tmp);
 	free(payload);
