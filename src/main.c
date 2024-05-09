@@ -62,6 +62,7 @@ static void usage(char *prog)
 	printf("    -6                                  IPv6-only mode\n");
 	printf("    -d <address|hostname>               Payload's destination (default: from c= in SDP payload)\n");
 	printf("    -p <file|->                         Payload file (default: -)\n");
+	printf("    -b <bw-limit>                       Total bits/s for all sessions in an SAP group (default: 4000)\n");
 	printf("    -h                                  This help page\n");
 	printf("\n");
 	printf("Debug options: (typ. not RFC compliant)\n");
@@ -71,7 +72,6 @@ static void usage(char *prog)
 	printf("    -i <interval>                       Interval override in seconds (default: 300)\n");
 	printf("    -J                                  Disable interval jitter\n");
 	printf("    -c <count>                          Number of messages to send\n");
-	printf("    -b <bw-limit>                       Total bits/s for all sessions in an SAP group (default: 4000)\n");
 // TODOs:
 //	printf("    -D                                  Disable duplicate announcement check\n");
 //	printf("    -m <bytes>                          Packet MTU (default: min(1000, iface-MTU))\n");

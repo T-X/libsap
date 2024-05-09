@@ -584,25 +584,37 @@ err:
 	return payload;
 }
 
-static char *sap_get_payload_dest(const char *payload, char *dest)
+static const char *sap_get_next_line(const char *pos)
+{
+	pos = strchr(pos, '\n');
+	if (!pos)
+		return NULL;
+
+	pos += 1;
+	if (*pos == '\r')
+		pos += 1;
+
+	return pos;
+}
+
+static int sap_get_payload_dest(const char *payload, char *dest, const char **parse_end)
 {
 	/* TODO: check for multiple "c=" lines, get
 	 * SAP multicast destination for each */
 	char *end;
+	printf("~~~ %s:%i: here\n", __func__, __LINE__);
+
+	if (!payload)
+		return -ENOENT;
 
 	while(1) {
 		if (!strncmp("c=", payload, strlen("c=")))
 			break;
 
-		/* go to next line */
-		payload = strchr(payload, '\n');
-		if (payload) {
-			payload += 1;
-			if (*payload == '\r')
-				payload += 1;
-		/* no next line exists */
-		} else {
-			return NULL;
+		payload = sap_get_next_line(payload);
+		if (!payload) {
+	printf("~~~ %s:%i: here\n", __func__, __LINE__);
+			return -ENOENT;
 		}
 	}
 
@@ -611,13 +623,80 @@ static char *sap_get_payload_dest(const char *payload, char *dest)
 	else if (!strncmp("c=IN IP4 ", payload, strlen("c=IN IP4 ")))
 		payload += strlen("c=IN IP4 ");
 
-	strncpy(dest, payload, INET6_ADDRSTRLEN);
+	if (dest) {
+		strncpy(dest, payload, INET6_ADDRSTRLEN);
 
-	end = strpbrk(dest, "/\r\n");
-	if (end)
-		*end = '\0';
+		end = strpbrk(dest, "/\r\n");
+		if (end)
+			*end = '\0';
+		printf("~~~ %s:%i: copied dest: %s\n", __func__, __LINE__, dest);
+	} else
+		printf("~~~ %s:%i: don't have 'dest', skipping copying\n", __func__, __LINE__, dest);
 
-	return dest;
+	if (parse_end)
+		*parse_end = sap_get_next_line(payload);
+
+	return 0;
+}
+
+static int sap_get_payload_dests_num(const char *payload)
+{
+	int num_dests = 0;
+	int ret;
+
+	while (payload) {
+		ret = sap_get_payload_dest(payload, NULL, &payload);
+		if (ret < 0)
+			break;
+
+		num_dests++;
+	}
+
+	return num_dests;
+}
+
+static char **sap_get_payload_dests(const char *payload)
+{
+	int num_dests = sap_get_payload_dests_num(payload);
+	char *dests_store;
+	char **dests = NULL;
+	char *dest;
+	int ret;
+
+	printf("~~~ %s:%i: here\n", __func__, __LINE__);
+	if (!num_dests)
+		return NULL;
+
+	printf("~~~ %s:%i: num_dests: %i\n", __func__, __LINE__, num_dests);
+	dests_store = calloc(num_dests, INET6_ADDRSTRLEN);
+	if (!dests_store)
+		return NULL;
+
+	printf("~~~ %s:%i: here\n", __func__, __LINE__);
+	dests = calloc(num_dests + 1, sizeof(*dests));
+	if (!dests)
+		goto err;
+
+	printf("~~~ %s:%i: here\n", __func__, __LINE__);
+	for (int i = 0; i < num_dests; i++) {
+		dest = dests_store + i * INET6_ADDRSTRLEN;
+		dests[i] = dest;
+
+	printf("~~~ %s:%i: here, dest: %s, \n", __func__, __LINE__);
+		ret = sap_get_payload_dest(payload, dest, &payload);
+		/* sanity check, should not happen */
+		if (ret < 0)
+			break;
+	printf("~~~ %s:%i: got dest: %s\n", __func__, __LINE__, dest);
+	}
+
+	printf("~~~ %s:%i: end, ok\n", __func__, __LINE__);
+	return dests;
+err:
+	free(dests_store);
+	free(dests);
+	printf("~~~ %s:%i: end, err\n", __func__, __LINE__);
+	return NULL;
 }
 
 static int sap_init_random_add_seed(struct random_data *rd, unsigned int seed)
@@ -816,6 +895,7 @@ struct sap_ctx *sap_init_custom(
 	long bw_limit)
 {
 	//char dest[INET6_ADDRSTRLEN];
+	char **payload_dests_tmp = NULL;
 	char *dest;
 	struct sap_ctx *ctx;
 	struct sap_ctx_dest *ctx_dest;
@@ -879,8 +959,11 @@ struct sap_ctx *sap_init_custom(
 	}
 
 //ToDo:
-//	if (!payload_dests && !strcmp(payload_type, SAP_PAYLOAD_TYPE_SDP))
-//		payload_dests = sap_get_payload_dests(payload, dest);
+	if (!payload_dests && !strcmp(payload_type, SAP_PAYLOAD_TYPE_SDP)) {
+		payload_dests_tmp = sap_get_payload_dests(payload);
+		payload_dests = payload_dests_tmp;
+	}
+	printf("~~~ %s:%i: here\n", __func__, __LINE__);
 	if (!payload_dests) {
 		errno = -EINVAL;
 		exit(2);
@@ -898,6 +981,7 @@ struct sap_ctx *sap_init_custom(
 		hlist_add_head(&ctx_dest->node, &ctx->dest_list);
 	}
 
+	free(payload_dests_tmp);
 	free(payload);
 	return ctx;
 
@@ -1234,6 +1318,9 @@ sap_session_create(struct sap_ctx_dest *ctx_dest, union sap_sockaddr_union *orig
 		.last_seen = { 0 },
 	};
 
+	/* TODO: Limit number of maximum sessions to create, to avoid being DoS'd
+	 * with an OOM? -> a session entry is 80 bytes right now
+	 */
 	session = malloc(sizeof(*session));
 	if (!session)
 		return NULL;
