@@ -122,9 +122,7 @@ static void get_args(int argc, char *argv[], int *addr_family, char ***dests, un
 		}
 	}
 
-	printf("~~~ %s:%i: here\n", __func__, __LINE__);
 	while ((opt = getopt(argc, argv, getopt_args_fmt)) != -1) {
-	printf("~~~ %s:%i: here\n", __func__, __LINE__);
 		switch (opt) {
 		case '4':
 			if (*addr_family != AF_UNSPEC)
@@ -140,11 +138,9 @@ static void get_args(int argc, char *argv[], int *addr_family, char ***dests, un
 			break;
 		/* TODO: allow multiple "-d" options */
 		case 'd':
-			printf("~~~ %s:%i: -d: %s (num_dests: %u, idx: %i\n", __func__, __LINE__, optarg, num_dests, dests_idx);
 			(*dests)[dests_idx++] = optarg;
 			break;
 		case 'p':
-	printf("~~~ %s:%i: here\n", __func__, __LINE__);
 			if (!strcmp("-", optarg))
 				break;
 			*payload_filename = optarg;

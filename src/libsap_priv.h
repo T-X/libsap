@@ -5,9 +5,16 @@
 #define __LIBSAP_PRIV_H__
 
 #include <netinet/in.h>
+#include <stdlib.h>
+#include <sys/epoll.h>
 #include <sys/socket.h>
+#include <threads.h>
+#include <unistd.h>
 
+#include "list.h"
 #include "libsap.h"
+
+#define SAP_EPOLL_MAX_EVENTS 32
 
 #define BIT(n) (1 << n)
 #define SAP_FLAG_TYPE (BIT(2))
@@ -33,6 +40,38 @@ union sap_sockaddr_union {
 	struct sockaddr_in in;
 	struct sockaddr_in6 in6;
 	struct sockaddr s;
+};
+
+enum sap_epoll_ctx_type {
+	SAP_EPOLL_CTX_TYPE_NONE = 0,
+	SAP_EPOLL_CTX_TYPE_RX,
+	SAP_EPOLL_CTX_TYPE_TX,
+};
+
+struct sap_ctx {
+	struct hlist_head dest_list;
+	int msg_type;
+	unsigned int interval;
+	int no_jitter;
+	unsigned long count;
+	unsigned long bw_limit;
+	int term;
+	enum sap_epoll_ctx_type epoll_ctx_none;
+	struct {
+		struct random_data rd;
+		char rs[256];
+	} rand;
+	struct {
+		struct epoll_event events[SAP_EPOLL_MAX_EVENTS];
+		int epoll_fd;
+		struct timespec epoll_timeout;
+	} epoll;
+	struct {
+		thrd_t *tid;
+		thrd_t tid_store;
+		mtx_t ctrl_lock;
+		int pipefd[2];
+	} thread;
 };
 
 struct sap_ctx_dest {
