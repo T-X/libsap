@@ -40,9 +40,7 @@
 
 #define SAP_PORT 9875
 #define SAP_PAYLOAD_TYPE_SDP "application/sdp"
-
-/* bits/s: */
-#define SAP_BANDWIDTH_LIMIT 4000
+#define SAP_BANDWIDTH_LIMIT 4000 /* bits/s */
 
 static int sap_init_random_add_seed(struct random_data *rd, unsigned int seed)
 {
@@ -73,7 +71,8 @@ static int sap_init_random(struct sap_ctx *sap_ctx)
 	 */
 
 	memset(rd, 0, sizeof(*rd));
-	ret = initstate_r((unsigned int)pid, sap_ctx->rand.rs, sizeof(sap_ctx->rand.rs), rd);
+	ret = initstate_r((unsigned int)pid, sap_ctx->rand.rs,
+			  sizeof(sap_ctx->rand.rs), rd);
 	if (ret < 0)
 		return ret;
 
@@ -101,12 +100,11 @@ static int sap_init_random(struct sap_ctx *sap_ctx)
 	if (ret < 0)
 		return ret;
 
-//	printf("~~~ %s:%i: up.tv_sec: %li, up.tv_nsec: %li, t.tv_sec: %li, t.tv_nsec: %li\n", __func__, __LINE__, uptime.tv_sec, uptime.tv_nsec, time.tv_sec, time.tv_nsec);
-
 	return 0;
 }
 
-static int sap_init_mod_epoll(int fd, struct sap_ctx *ctx, enum sap_epoll_ctx_type *type, int op)
+static int sap_init_mod_epoll(int fd, struct sap_ctx *ctx,
+			      enum sap_epoll_ctx_type *type, int op)
 {
 	struct epoll_event event;
 
@@ -117,7 +115,8 @@ static int sap_init_mod_epoll(int fd, struct sap_ctx *ctx, enum sap_epoll_ctx_ty
 	return epoll_ctl(ctx->epoll.epoll_fd, EPOLL_CTL_ADD, fd, &event);
 }
 
-static int sap_init_add_epoll(int fd, struct sap_ctx *ctx, enum sap_epoll_ctx_type *type)
+static int sap_init_add_epoll(int fd, struct sap_ctx *ctx,
+			      enum sap_epoll_ctx_type *type)
 {
 	return sap_init_mod_epoll(fd, ctx, type, EPOLL_CTL_ADD);
 }
@@ -233,12 +232,12 @@ static const char *sap_get_next_line(const char *pos)
 	return pos;
 }
 
-static int sap_get_payload_dest(const char *payload, char *dest, const char **parse_end)
+static int sap_get_payload_dest(const char *payload, char *dest,
+				const char **parse_end)
 {
 	/* TODO: check for multiple "c=" lines, get
 	 * SAP multicast destination for each */
 	char *end;
-	printf("~~~ %s:%i: here\n", __func__, __LINE__);
 
 	if (!payload)
 		return -ENOENT;
@@ -248,10 +247,8 @@ static int sap_get_payload_dest(const char *payload, char *dest, const char **pa
 			break;
 
 		payload = sap_get_next_line(payload);
-		if (!payload) {
-	printf("~~~ %s:%i: here\n", __func__, __LINE__);
+		if (!payload)
 			return -ENOENT;
-		}
 	}
 
 	if (!strncmp("c=IN IP6 ", payload, strlen("c=IN IP6 ")))
@@ -297,21 +294,17 @@ static char **sap_get_payload_dests(const char *payload)
 	char *dest;
 	int ret;
 
-	printf("~~~ %s:%i: here\n", __func__, __LINE__);
 	if (!num_dests)
 		return NULL;
 
-	printf("~~~ %s:%i: num_dests: %i\n", __func__, __LINE__, num_dests);
 	dests_store = calloc(num_dests, INET6_ADDRSTRLEN);
 	if (!dests_store)
 		return NULL;
 
-	printf("~~~ %s:%i: here\n", __func__, __LINE__);
 	dests = calloc(num_dests + 1, sizeof(*dests));
 	if (!dests)
 		goto err;
 
-	printf("~~~ %s:%i: here\n", __func__, __LINE__);
 	for (int i = 0; i < num_dests; i++) {
 		dest = dests_store + i * INET6_ADDRSTRLEN;
 		dests[i] = dest;
@@ -320,19 +313,17 @@ static char **sap_get_payload_dests(const char *payload)
 		/* sanity check, should not happen */
 		if (ret < 0)
 			goto err;
-	printf("~~~ %s:%i: got dest: %s\n", __func__, __LINE__, dest);
 	}
 
-	printf("~~~ %s:%i: end, ok\n", __func__, __LINE__);
 	return dests;
 err:
 	free(dests_store);
 	free(dests);
-	printf("~~~ %s:%i: end, err\n", __func__, __LINE__);
 	return NULL;
 }
 
-static int sap_get_ip4_dst(const struct sockaddr_in *pay_dst, struct sockaddr_in *sap_dst)
+static int sap_get_ip4_dst(const struct sockaddr_in *pay_dst,
+			   struct sockaddr_in *sap_dst)
 {
 	/* TODOs/open questions:
 	 * 1) from the static global scope (224.0.1.0 - 238.255.255.255),
@@ -368,9 +359,9 @@ static int sap_get_ip4_dst(const struct sockaddr_in *pay_dst, struct sockaddr_in
 	return 0;
 }
 
-static int sap_get_ip6_dst(const struct sockaddr_in6 *pay_dst, struct sockaddr_in6 *sap_dst)
+static int sap_get_ip6_dst(const struct sockaddr_in6 *pay_dst,
+			   struct sockaddr_in6 *sap_dst)
 {
-	char dest[INET6_ADDRSTRLEN];
 	/* TODOs/open questions:
 	 * Should we really accept unicast payload destinations here?
 	 * (VLC does?)
@@ -392,22 +383,17 @@ static int sap_get_ip6_dst(const struct sockaddr_in6 *pay_dst, struct sockaddr_i
 		/* global scope */
 		dst.s6_addr[1] = 0x0e;
 
-//printf("~~~ %s:%i: pay_dst: %i\n", __func__, __LINE__, pay_dst->sin6_family);
-//printf("~~~ %s:%i: here\n", __func__, __LINE__);
 	sap_dst->sin6_family = pay_dst->sin6_family;
 	sap_dst->sin6_addr = dst;
 	sap_dst->sin6_port = htons(SAP_PORT);
 	sap_dst->sin6_flowinfo = 0;
 	sap_dst->sin6_scope_id = pay_dst->sin6_scope_id;
 
-inet_ntop(AF_INET6, &pay_dst->sin6_addr, dest, sizeof(dest));
-printf("~~~ %s:%i: here, ai_family: %i, dest: %s, scope_id: %i\n", __func__, __LINE__, pay_dst->sin6_family, dest, pay_dst->sin6_scope_id);
-
-
 	return 0;
 }
 
-static int sap_get_ip_dst(union sap_sockaddr_union *addr, union sap_sockaddr_union *sap_dst)
+static int sap_get_ip_dst(union sap_sockaddr_union *addr,
+			  union sap_sockaddr_union *sap_dst)
 {
 	switch (addr->s.sa_family) {
 	case AF_INET:
@@ -436,7 +422,7 @@ static int sap_set_hop_limit(int sd, union sap_sockaddr_union *sap_dst)
 		return setsockopt(sd, IPPROTO_IP, IP_MULTICAST_TTL, &hops,
 				  sizeof(hops));
 	case AF_INET6:
-		/* hop_limit to 1 for link-local scope? */
+		/* TODO: hop_limit to 1 for link-local scope? */
 		return setsockopt(sd, IPPROTO_IPV6, IPV6_MULTICAST_HOPS, &hops,
 				  sizeof(hops));
 	}
@@ -446,45 +432,29 @@ static int sap_set_hop_limit(int sd, union sap_sockaddr_union *sap_dst)
 
 static int sap_join_dest4(struct sap_ctx_dest *ctx_dest)
 {
-	int ret;
-
 	struct ip_mreqn mreq = {
 		.imr_multiaddr = ctx_dest->dest.in.sin_addr,
 		.imr_address = ctx_dest->src.in.sin_addr,
 		.imr_ifindex = 0,
 	};
 
-	ret = setsockopt(ctx_dest->sd_rx, IPPROTO_IP, IP_ADD_MEMBERSHIP, &mreq,
-			 sizeof(mreq));
-
-	printf("~~~ %s:%i: ret: %i\n", __func__, __LINE__, ret);
-	return ret;
+	return setsockopt(ctx_dest->sd_rx, IPPROTO_IP, IP_ADD_MEMBERSHIP, &mreq,
+			  sizeof(mreq));
 }
 
 static int sap_join_dest6(struct sap_ctx_dest *ctx_dest)
 {
-	char dest[INET6_ADDRSTRLEN];
-	int ret;
-
-inet_ntop(ctx_dest->dest.in6.sin6_family, &ctx_dest->dest.in6.sin6_addr, dest, sizeof(dest));
-printf("~~~ %s:%i: here, ai_family: %i, dest: %s, scope_id: %i\n", __func__, __LINE__, ctx_dest->dest.in6.sin6_family, dest, ctx_dest->dest.in6.sin6_scope_id);
-
 	struct ipv6_mreq mreq = {
 		.ipv6mr_multiaddr = ctx_dest->dest.in6.sin6_addr,
 		.ipv6mr_interface = ctx_dest->dest.in6.sin6_scope_id,
 	};
 
-	ret = setsockopt(ctx_dest->sd_rx, IPPROTO_IPV6, IPV6_JOIN_GROUP, &mreq,
-			 sizeof(mreq));
-
-	printf("~~~ %s:%i: ret: %i\n", __func__, __LINE__, ret);
-	return ret;
+	return setsockopt(ctx_dest->sd_rx, IPPROTO_IPV6, IPV6_JOIN_GROUP, &mreq,
+			  sizeof(mreq));
 }
 
 static int sap_join_dest(struct sap_ctx_dest *ctx_dest)
 {
-	printf("~~~ %s:%i: start\n", __func__, __LINE__);
-
 	switch (ctx_dest->dest.s.sa_family) {
 	case AF_INET:
 		return sap_join_dest4(ctx_dest);
@@ -492,7 +462,6 @@ static int sap_join_dest(struct sap_ctx_dest *ctx_dest)
 		return sap_join_dest6(ctx_dest);
 	}
 
-	printf("~~~ %s:%i: start\n", __func__, __LINE__);
 	return -EINVAL;
 }
 
@@ -557,9 +526,9 @@ err:
 	return ret;
 }
 
-static int sap_create_socket(struct sap_ctx_dest *ctx_dest, char *pay_dst, int af_hint)
+static int sap_create_socket(struct sap_ctx_dest *ctx_dest, char *pay_dst,
+			     int af_hint)
 {
-	char dest[INET6_ADDRSTRLEN];
 	union sap_sockaddr_union sap_dst = { 0 };
 	union sap_sockaddr_union ai_addr;
 	struct addrinfo hints, *servinfo, *p;
@@ -574,8 +543,10 @@ static int sap_create_socket(struct sap_ctx_dest *ctx_dest, char *pay_dst, int a
 		return -EINVAL;
 
 	/* resolve potential hostname to IP address */
-	/* TODO: 1) get/set payload port here instead of NULL? needed for SRV records?
-	 * 2) try inet_pton() first, before trying to resolve hostnames? */
+	/* TODO: 1) get/set payload port here instead of NULL? needed for SRV
+	 * records?
+	 * 2) try inet_pton() first, before trying to resolve hostnames?
+	 */
 	ret = getaddrinfo(pay_dst, NULL, &hints, &servinfo);
 	if (ret < 0)
 		return ret;
@@ -587,17 +558,12 @@ static int sap_create_socket(struct sap_ctx_dest *ctx_dest, char *pay_dst, int a
 			break;
 
 		memcpy(&ai_addr, p->ai_addr, p->ai_addrlen);
-//inet_ntop(p->ai_family, &((struct sockaddr_in6 *)&p->ai_addr)->sin6_addr, dest, sizeof(dest));
-inet_ntop(p->ai_family, &ai_addr.in6.sin6_addr, dest, sizeof(dest));
-printf("~~~ %s:%i: here, ai_family: %i, ai_addr: %s\n", __func__, __LINE__, p->ai_family, dest);
 		ret = sap_get_ip_dst(&ai_addr, &sap_dst);
 		if (ret < 0)
 			break;
 
 		ctx_dest->dest = sap_dst;
 
-		if (p->ai_addr->sa_family != sap_dst.s.sa_family)
-			fprintf(stderr, "Error: address family was not copied? %i vs. %i\n", p->ai_addr->sa_family, sap_dst.s.sa_family);
 		ret = sap_create_socket_tx(ctx_dest);
 		if (ret < 0)
 			continue;
@@ -610,15 +576,11 @@ printf("~~~ %s:%i: here, ai_family: %i, ai_addr: %s\n", __func__, __LINE__, p->a
 
 		/* ok */
 		break;
-//printf("~~~ %s:%i: sap_dst.s.sa_family: %i, proto: %i\n", __func__, __LINE__, sap_dst.s.sa_family,IPPROTO_UDP);
 	}
 
-//printf("~~~ %s:%i: sd: %i\n", __func__, __LINE__, sd);
 	freeaddrinfo(servinfo);
 	return ret;
 }
-
-
 
 static void sap_free_socket(struct sap_ctx_dest *ctx_dest)
 {
@@ -688,7 +650,9 @@ static char *sap_push_payload(char *msg, const char *payload)
 	return msg + len;
 }
 
-static void sap_create_message(struct sap_ctx_dest *ctx_dest, const char *payload, const char *payload_type, int msg_type, uint16_t msg_id_hash)
+static void sap_create_message(struct sap_ctx_dest *ctx_dest,
+			       const char *payload, const char *payload_type,
+			       int msg_type, uint16_t msg_id_hash)
 {
 	int sap_af = ctx_dest->dest.s.sa_family;
 	size_t len, orig_source_len = 0;
@@ -746,18 +710,21 @@ static int sap_init_ctx_dest_add_epoll(struct sap_ctx_dest *ctx_dest)
 	int ret;
 
 	/* unused / should not receive anything */
-	ret = sap_init_add_epoll(ctx_dest->sd_tx, ctx_dest->ctx, &ctx_dest->ctx->epoll_ctx_none);
+	ret = sap_init_add_epoll(ctx_dest->sd_tx, ctx_dest->ctx,
+				 &ctx_dest->ctx->epoll_ctx_none);
 	if (ret < 0)
 		return ret;
 
 	/* SAP packet reception */
-	ret = sap_init_add_epoll(ctx_dest->sd_rx, ctx_dest->ctx, &ctx_dest->epoll_ctx_rx);
+	ret = sap_init_add_epoll(ctx_dest->sd_rx, ctx_dest->ctx,
+				 &ctx_dest->epoll_ctx_rx);
 	if (ret < 0) {
 		return ret;
 	}
 
 	/* wake-up timer for SAP packet transmission */
-	ret = sap_init_add_epoll(ctx_dest->timer_fd, ctx_dest->ctx, &ctx_dest->epoll_ctx_tx);
+	ret = sap_init_add_epoll(ctx_dest->timer_fd, ctx_dest->ctx,
+				 &ctx_dest->epoll_ctx_tx);
 	if (ret < 0)
 		return ret;
 
@@ -771,12 +738,14 @@ static void sap_init_ctx_dest_del_epoll(struct sap_ctx_dest *ctx_dest)
 	sap_init_del_epoll(ctx_dest->sd_tx, ctx_dest->ctx);
 }
 
-static struct sap_ctx_dest *sap_init_ctx_dest(struct sap_ctx *ctx, char *payload_dest, int payload_dest_af, char *payload_type, char *payload, int msg_type, uint16_t msg_id_hash)
+static struct sap_ctx_dest *
+sap_init_ctx_dest(struct sap_ctx *ctx, char *payload_dest, int payload_dest_af,
+		  char *payload_type, char *payload, int msg_type,
+		  uint16_t msg_id_hash)
 {
 	struct sap_ctx_dest *ctx_dest;
 	int ret;
 
-	printf("~~~ %s:%i: start, dest: %s\n", __func__, __LINE__, payload_dest);
 	ctx_dest = malloc(sizeof(*ctx_dest));
 	if (!ctx_dest)
 		return NULL;
@@ -793,12 +762,10 @@ static struct sap_ctx_dest *sap_init_ctx_dest(struct sap_ctx *ctx, char *payload
 	if (ctx_dest->timer_fd < 0)
 		goto err2;
 
-	printf("~~~ %s:%i: start, dest: %s\n", __func__, __LINE__, payload_dest);
 	ret = sap_create_socket(ctx_dest, payload_dest, payload_dest_af);
 	if (ret < 0)
 		goto err3;
 
-	printf("~~~ %s:%i: start, dest: %s\n", __func__, __LINE__, payload_dest);
 	sap_create_message(ctx_dest, payload, payload_type, msg_type, msg_id_hash);
 	if (!ctx_dest->message)
 		goto err4;
@@ -839,16 +806,18 @@ static void sap_free_ctx_dests(struct sap_ctx *ctx)
 	}
 }
 
-static int sap_init_ctx_dests(struct sap_ctx *ctx, char *payload_dests[], int payload_dest_af, char *payload_type, char *payload, int msg_type, uint16_t msg_id)
+static int sap_init_ctx_dests(struct sap_ctx *ctx, char *payload_dests[],
+			      int payload_dest_af, char *payload_type,
+			      char *payload, int msg_type, uint16_t msg_id)
 {
 	struct sap_ctx_dest *ctx_dest;
 	char *dest;
 	int i;
 
-	printf("~~~ %s:%i: here\n", __func__, __LINE__);
 	for (i = 0, dest = payload_dests[i]; dest; dest = payload_dests[++i]) {
-	printf("~~~ %s:%i: here\n", __func__, __LINE__);
-		ctx_dest = sap_init_ctx_dest(ctx, dest, payload_dest_af, payload_type, payload, msg_type, msg_id);
+		ctx_dest = sap_init_ctx_dest(ctx, dest, payload_dest_af,
+					     payload_type, payload, msg_type,
+					     msg_id);
 		if (!ctx_dest)
 			goto err;
 
@@ -925,14 +894,12 @@ struct sap_ctx *sap_init_custom(
 
 	msg_id = sap_get_msg_id_hash(ctx, msg_id_hash);
 
-	printf("~~~ %s:%i: here\n", __func__, __LINE__);
 	ret = sap_init_epoll(ctx);
 	if (ret < 0) {
 		errno = -EPERM;
 		goto err2;
 	}
 
-	printf("~~~ %s:%i: here, payload_filename: %s\n", __func__, __LINE__, payload_filename);
 	payload = sap_get_payload(payload_filename);
 	if (!payload) {
 		errno = -ENOENT;
@@ -943,14 +910,14 @@ struct sap_ctx *sap_init_custom(
 		payload_dests_tmp = sap_get_payload_dests(payload);
 		payload_dests = payload_dests_tmp;
 	}
-	printf("~~~ %s:%i: here\n", __func__, __LINE__);
 	if (!payload_dests) {
 		errno = -EINVAL;
 		exit(2);
 		goto err4;
 	}
 
-	ret = sap_init_ctx_dests(ctx, payload_dests, payload_dest_af, payload_type, payload, msg_type, msg_id);
+	ret = sap_init_ctx_dests(ctx, payload_dests, payload_dest_af,
+				 payload_type, payload, msg_type, msg_id);
 	if (ret < 0)
 		goto err5;
 
@@ -974,7 +941,8 @@ err1:
 /* use this for fully RFC2974 compliant execution, e.g. for daemons */
 struct sap_ctx *sap_init(char *payload_filename)
 {
-	return sap_init_custom(NULL, AF_UNSPEC, payload_filename, NULL, -1, NULL, 0, 0, 0, 0);
+	return sap_init_custom(NULL, AF_UNSPEC, payload_filename, NULL, -1,
+			       NULL, 0, 0, 0, 0);
 }
 
 void sap_free(struct sap_ctx *ctx)

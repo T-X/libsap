@@ -18,8 +18,6 @@ static struct sap_ctx *p_sap_ctx = NULL;
 
 void signal_handler_shutdown(int signum)
 {
-	printf("~~~ %s:%i: start\n", __func__, __LINE__);
-	//sap_stop(p_sap_ctx);
 	sap_term(p_sap_ctx);
 }
 
@@ -44,12 +42,6 @@ void setup_signal_handler(struct sap_ctx *ctx)
 	sigaction(SIGTERM, NULL, &old_action);
 	if (old_action.sa_handler != SIG_IGN)
 		sigaction(SIGTERM, &new_action, NULL);
-
-//	sigaction(SIGUSR1, NULL, &old_action);
-//	if (old_action.sa_handler != SIG_IGN) {
-//		new_action.sa_handler = &signal_handler_status;
-//		sigaction(SIGUSR1, &new_action, NULL);
-//	}
 }
 
 static void usage(char *prog)
@@ -96,7 +88,19 @@ static unsigned int get_num_dests(int argc, char *argv[])
 	return num_dests;
 }
 
-static void get_args(int argc, char *argv[], int *addr_family, char ***dests, unsigned int num_dests, char **payload_filename, char **payload_type, int *msg_type, uint16_t **p_msg_id_hash, unsigned int *interval, int *no_jitter, unsigned long *count, long *bw_limit)
+static void get_args(int argc,
+		     char *argv[],
+		     int *addr_family,
+		     char ***dests,
+		     unsigned int num_dests,
+		     char **payload_filename,
+		     char **payload_type,
+		     int *msg_type,
+		     uint16_t **p_msg_id_hash,
+		     unsigned int *interval,
+		     int *no_jitter,
+		     unsigned long *count,
+		     long *bw_limit)
 {
 	int msg_id_hash_found = 0;
 	int dests_idx = 0;
@@ -109,11 +113,11 @@ static void get_args(int argc, char *argv[], int *addr_family, char ***dests, un
 	}
 
 	if (num_dests) {
-		//*dests = malloc(sizeof(*dests) * (num_dests+1));
-		// one more element with NULL to point to the end
+		/* one more element with NULL to point to the end */
 		*dests = calloc(num_dests + 1, sizeof(*dests));
 		if (!*dests) {
-			fprintf(stderr, "Error: Could not allocate destinations\n");
+			fprintf(stderr,
+				"Error: Could not allocate destinations\n");
 			usage(argv[0]);
 			exit(1);
 		}
@@ -133,7 +137,6 @@ static void get_args(int argc, char *argv[], int *addr_family, char ***dests, un
 			else
 				*addr_family = AF_INET6;
 			break;
-		/* TODO: allow multiple "-d" options */
 		case 'd':
 			(*dests)[dests_idx++] = optarg;
 			break;
@@ -151,7 +154,9 @@ static void get_args(int argc, char *argv[], int *addr_family, char ***dests, un
 			} else if (!strcmp("terminate", optarg)) {
 				*msg_type = 1;
 			} else {
-				fprintf(stderr, "Error: unknown message type '%s'\n\n", optarg);
+				fprintf(stderr,
+					"Error: unknown message type '%s'\n\n",
+					optarg);
 				usage(argv[0]);
 				exit(1);
 			}
@@ -159,7 +164,9 @@ static void get_args(int argc, char *argv[], int *addr_family, char ***dests, un
 		case 'I':
 			ret = strtoi_generic(optarg, *p_msg_id_hash);
 			if (ret < 0) {
-				fprintf(stderr, "Error: invalid message hash id '%s'\n\n", optarg);
+				fprintf(stderr,
+					"Error: invalid message hash id '%s'\n\n",
+					optarg);
 				usage(argv[0]);
 				exit(1);
 			}
@@ -171,7 +178,9 @@ static void get_args(int argc, char *argv[], int *addr_family, char ***dests, un
 		case 'i':
 			ret = strtoi_generic(optarg, interval);
 			if (ret < 0) {
-				fprintf(stderr, "Error: invalid interval '%s'\n\n", optarg);
+				fprintf(stderr,
+					"Error: invalid interval '%s'\n\n",
+					optarg);
 				usage(argv[0]);
 				exit(1);
 			}
@@ -179,7 +188,8 @@ static void get_args(int argc, char *argv[], int *addr_family, char ***dests, un
 		case 'c':
 			ret = strtoi_generic(optarg, count);
 			if (ret < 0) {
-				fprintf(stderr, "Error: invalid count '%s'\n\n", optarg);
+				fprintf(stderr, "Error: invalid count '%s'\n\n",
+					optarg);
 				usage(argv[0]);
 				exit(1);
 			}
@@ -187,7 +197,9 @@ static void get_args(int argc, char *argv[], int *addr_family, char ***dests, un
 		case 'b':
 			ret = strtoi_generic(optarg, bw_limit);
 			if (ret < 0) {
-				fprintf(stderr, "Error: invalid bandwidth limit '%s'\n\n", optarg);
+				fprintf(stderr,
+					"Error: invalid bandwidth limit '%s'\n\n",
+					optarg);
 				usage(argv[0]);
 				exit(1);
 			}
@@ -201,7 +213,8 @@ static void get_args(int argc, char *argv[], int *addr_family, char ***dests, un
 	}
 
 	if (*addr_family == -EINVAL) {
-		fprintf(stderr, "Error: '-4' and '-6' are mutually exclusive\n\n");
+		fprintf(stderr,
+			"Error: '-4' and '-6' are mutually exclusive\n\n");
 		usage(argv[0]);
 		exit(1);
 	}
@@ -226,10 +239,13 @@ int main(int argc, char *argv[])
 	unsigned long count = 0;
 	long bw_limit = 0;
 
-	get_args(argc, argv, &addr_family, &dests, num_dests, &payload_filename, &payload_type, &msg_type, &p_msg_id_hash, &interval, &no_jitter, &count, &bw_limit);
+	get_args(argc, argv, &addr_family, &dests, num_dests, &payload_filename,
+		 &payload_type, &msg_type, &p_msg_id_hash, &interval,
+		 &no_jitter, &count, &bw_limit);
 
-	ctx = sap_init_custom(dests, addr_family, payload_filename, payload_type,
-			      msg_type, p_msg_id_hash, interval, no_jitter, count, bw_limit);
+	ctx = sap_init_custom(dests, addr_family, payload_filename,
+			      payload_type, msg_type, p_msg_id_hash, interval,
+			      no_jitter, count, bw_limit);
 	if (!ctx) {
 		usage(argv[0]);
 		exit(1);
@@ -237,20 +253,14 @@ int main(int argc, char *argv[])
 
 	setup_signal_handler(ctx);
 
-//	sap_run(&ctx);
-	printf("~~~ %s:%i: starting thread\n", __func__, __LINE__);
-//	sap_start(ctx);
 	sap_run(ctx);
-//	printf("~~~ %s:%i: waiting 15 seconds\n", __func__, __LINE__);
-//	sleep(300);
-//	printf("~~~ %s:%i: stopping thread\n", __func__, __LINE__);
+
+	/* alternative to blocking sap_run(), run threaded: */
+//	sap_start(ctx);
+	/* do stuff here */
 //	sap_stop(ctx);
-//	printf("~~~ %s:%i: freeing thread\n", __func__, __LINE__);
 
 	sap_free(ctx);
-	printf("~~~ %s:%i: free'd thread, returning\n", __func__, __LINE__);
-//	sleep(10);
-	printf("~~~ %s:%i: exit'ing\n", __func__, __LINE__);
 
 	return 0;
 }
