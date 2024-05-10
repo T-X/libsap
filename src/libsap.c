@@ -1,9 +1,11 @@
 /* SPDX-FileCopyrightText: 2024 Linus Lüssing <linus.luessing@c0d3.blue> */
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 
+#include <errno.h>
 #include <limits.h>
 #include <netinet/in.h>
 #include <signal.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stddef.h>
 #include <string.h>
@@ -16,7 +18,6 @@
 #include <time.h>
 #include <unistd.h>
 
-#include <errno.h>
 #include <arpa/inet.h> // inet_ntop()
 
 #include "libsap.h"
@@ -100,12 +101,33 @@ static void sap_set_timer_next(struct sap_ctx_dest *ctx_dest)
 	timerfd_settime(ctx_dest->timer_fd, 0, &timer, NULL);
 }
 
+static void sap_set_timer_now(struct sap_ctx_dest *ctx_dest)
+{
+	struct itimerspec timer = {
+		.it_interval = { 0 },
+		.it_value = {
+			.tv_sec = 0,
+			.tv_nsec = 1,
+		}
+	};
+
+	timerfd_settime(ctx_dest->timer_fd, 0, &timer, NULL);
+}
+
 static void sap_set_timers_next(struct sap_ctx *ctx)
 {
 	struct sap_ctx_dest *ctx_dest;
 
 	hlist_for_each_entry(ctx_dest, &ctx->dest_list, node)
 		sap_set_timer_next(ctx_dest);
+}
+
+static void sap_set_timers_now(struct sap_ctx *ctx)
+{
+	struct sap_ctx_dest *ctx_dest;
+
+	hlist_for_each_entry(ctx_dest, &ctx->dest_list, node)
+		sap_set_timer_now(ctx_dest);
 }
 
 static void sap_set_msg_type(struct sap_ctx_dest *ctx_dest, int msg_type)
@@ -565,32 +587,28 @@ int sap_run(struct sap_ctx *ctx)
 
 	int timeout = -1, ev_count = -1;
 
-	sap_set_timers_next(ctx);
-
-	/* Without an explicit interval and with a specific
-	 * message type we will just send a single one-shot
-	 * packet of this type.
-	 */
-/*	if (!ctx->interval && ctx->msg_type >= 0) {
-		ret = sap_send(ctx);
-		goto out;
-	}*/
-
 	/* for standard RFC2974 operation, we should not send immediately,
 	 * but instead wait and listen first (see section 3.1.1)
 	 */
-//	if (ctx->msg_type == -1)
-//		sap_set_timeout_next(ctx);
+	if (ctx->msg_type == -1)
+		sap_set_timers_next(ctx);
+	else
 	/* when msg_type is set explicitly then we assume the user is
 	 * using this for debugging and needs more immediate
-	 * responsiveness
+	 * responsiveness, like a ping utility
 	 */
-//	else
-//		sap_set_timeout_now(ctx);
-
+		sap_set_timers_now(ctx);
 
 	printf("~~~ %s:%i: here1\n", __func__, __LINE__);
 
+	/* memory barrier:
+	 * reading/writing from/to ctx->term can happen through
+	 * another thread calling sap_term(), make sure that
+	 * we don't get reordered with the read/write to the
+	 * signaling pipe-fd
+	 * TODO: check that we're doing this right
+	 */
+	atomic_thread_fence(memory_order_acquire);
 	while(!ctx->term) {
 		printf("~~~ %s:%i: calling: epoll_wait(), timeout: %i  (ctx->term: %i)\n", __func__, __LINE__, timeout, ctx->term);
 		ev_count = epoll_wait(ctx->epoll.epoll_fd, ctx->epoll.events, SAP_EPOLL_MAX_EVENTS, -1);
@@ -605,6 +623,8 @@ int sap_run(struct sap_ctx *ctx)
 		}
 
 	printf("~~~ %s:%i: here1, %u\n", __func__, __LINE__, timeout);
+		/* for ctx->term, see above */
+		atomic_thread_fence(memory_order_acquire);
 	}
 
 	if (ctx->msg_type < 0)
@@ -661,14 +681,15 @@ err1:
 
 void sap_term(struct sap_ctx *ctx)
 {
-	printf("~~~ %s:%i: start\n", __func__, __LINE__);
 	ctx->term = 1;
-	/* memory barrier needed against reordering? */
-	char c = '\0';
-	write(ctx->thread.pipefd[1], &c, sizeof(c));
-
-
-	printf("~~~ %s:%i: term = 1 set\n", __func__, __LINE__);
+	/* memory barrier:
+	 * reading/writing from/to ctx->term can happen through
+	 * another thread calling sap_run(), make sure that
+	 * we don't get reordered with the read/write to the
+	 * signaling pipe-fd
+	 */
+	atomic_thread_fence(memory_order_release);
+	write(ctx->thread.pipefd[1], &(char){'\0'}, sizeof(char));
 }
 
 void sap_stop(struct sap_ctx *ctx)
