@@ -693,7 +693,6 @@ static void sap_create_message(struct sap_ctx_dest *ctx_dest,
 	msg = sap_push_payload(msg, payload);
 
 	if (msg - ctx_dest->message != len) {
-		fprintf(stderr, "Error: Invalid message length\n");
 		free(ctx_dest->message);
 		ctx_dest->message = NULL;
 		len = 0;
@@ -718,9 +717,8 @@ static int sap_init_ctx_dest_add_epoll(struct sap_ctx_dest *ctx_dest)
 	/* SAP packet reception */
 	ret = sap_init_add_epoll(ctx_dest->sd_rx, ctx_dest->ctx,
 				 &ctx_dest->epoll_ctx_rx);
-	if (ret < 0) {
+	if (ret < 0)
 		return ret;
-	}
 
 	/* wake-up timer for SAP packet transmission */
 	ret = sap_init_add_epoll(ctx_dest->timer_fd, ctx_dest->ctx,
@@ -760,28 +758,28 @@ sap_init_ctx_dest(struct sap_ctx *ctx, char *payload_dest, int payload_dest_af,
 
 	ctx_dest->timer_fd = timerfd_create(CLOCK_MONOTONIC, O_NONBLOCK);
 	if (ctx_dest->timer_fd < 0)
-		goto err2;
+		goto err1;
 
 	ret = sap_create_socket(ctx_dest, payload_dest, payload_dest_af);
 	if (ret < 0)
-		goto err3;
+		goto err2;
 
 	sap_create_message(ctx_dest, payload, payload_type, msg_type, msg_id_hash);
 	if (!ctx_dest->message)
-		goto err4;
+		goto err3;
 
 	ret = sap_init_ctx_dest_add_epoll(ctx_dest);
 	if (ret < 0)
-		goto err5;
+		goto err4;
 
 	return ctx_dest;
-err5:
-	free(ctx_dest->message);
 err4:
-	sap_free_socket(ctx_dest);
+	free(ctx_dest->message);
 err3:
-	close(ctx_dest->timer_fd);
+	sap_free_socket(ctx_dest);
 err2:
+	close(ctx_dest->timer_fd);
+err1:
 	free(ctx_dest);
 	return NULL;
 }
