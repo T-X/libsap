@@ -62,7 +62,6 @@ static int sap_init_random(struct sap_ctx *sap_ctx)
 	pid_t pid = getpid();
 	thrd_t tid = thrd_current();
 	struct timespec uptime, time;
-	int32_t rand;
 	int ret;
 
 	/* We don't need crypto quality random numbers. But we want to:
@@ -107,7 +106,7 @@ static int sap_init_random(struct sap_ctx *sap_ctx)
 	return 0;
 }
 
-static int sap_init_add_epoll(int fd, struct sap_ctx *ctx, enum sap_epoll_ctx_type *type)
+static int sap_init_mod_epoll(int fd, struct sap_ctx *ctx, enum sap_epoll_ctx_type *type, int op)
 {
 	struct epoll_event event;
 
@@ -116,6 +115,18 @@ static int sap_init_add_epoll(int fd, struct sap_ctx *ctx, enum sap_epoll_ctx_ty
 	event.data.ptr = type;
 
 	return epoll_ctl(ctx->epoll.epoll_fd, EPOLL_CTL_ADD, fd, &event);
+}
+
+static int sap_init_add_epoll(int fd, struct sap_ctx *ctx, enum sap_epoll_ctx_type *type)
+{
+	return sap_init_mod_epoll(fd, ctx, type, EPOLL_CTL_ADD);
+}
+
+static int sap_init_del_epoll(int fd, struct sap_ctx *ctx)
+{
+	enum sap_epoll_ctx_type type = SAP_EPOLL_CTX_TYPE_NONE;
+
+	return sap_init_mod_epoll(fd, ctx, &type, EPOLL_CTL_DEL);
 }
 
 static uint16_t sap_get_msg_id_hash(struct sap_ctx *ctx, uint16_t *msg_id_hash)
@@ -131,7 +142,7 @@ static int sap_init_epoll(struct sap_ctx *ctx)
 	int ret = -EINVAL;
 
 	ctx->epoll.epoll_fd = epoll_create1(0);
-	if (!ctx->epoll.epoll_fd < 0)
+	if (ctx->epoll.epoll_fd < 0)
 		goto err1;
 
 	ret = pipe(ctx->thread.pipefd);
@@ -153,6 +164,13 @@ err2:
 	close(ctx->epoll.epoll_fd);
 err1:
 	return ret;
+}
+
+static void sap_free_epoll(struct sap_ctx *ctx)
+{
+	close(ctx->thread.pipefd[0]);
+	close(ctx->thread.pipefd[1]);
+	close(ctx->epoll.epoll_fd);
 }
 
 static char *sap_get_payload(char *payload_filename)
@@ -247,9 +265,7 @@ static int sap_get_payload_dest(const char *payload, char *dest, const char **pa
 		end = strpbrk(dest, "/\r\n");
 		if (end)
 			*end = '\0';
-		printf("~~~ %s:%i: copied dest: %s\n", __func__, __LINE__, dest);
-	} else
-		printf("~~~ %s:%i: don't have 'dest', skipping copying\n", __func__, __LINE__, dest);
+	}
 
 	if (parse_end)
 		*parse_end = sap_get_next_line(payload);
@@ -300,7 +316,6 @@ static char **sap_get_payload_dests(const char *payload)
 		dest = dests_store + i * INET6_ADDRSTRLEN;
 		dests[i] = dest;
 
-	printf("~~~ %s:%i: here, dest: %s, \n", __func__, __LINE__);
 		ret = sap_get_payload_dest(payload, dest, &payload);
 		/* sanity check, should not happen */
 		if (ret < 0)
@@ -738,6 +753,13 @@ static int sap_init_ctx_dest_add_epoll(struct sap_ctx_dest *ctx_dest)
 	return 0;
 }
 
+static void sap_init_ctx_dest_del_epoll(struct sap_ctx_dest *ctx_dest)
+{
+	sap_init_del_epoll(ctx_dest->timer_fd, ctx_dest->ctx);
+	sap_init_del_epoll(ctx_dest->sd_rx, ctx_dest->ctx);
+	sap_init_del_epoll(ctx_dest->sd_tx, ctx_dest->ctx);
+}
+
 static struct sap_ctx_dest *sap_init_ctx_dest(struct sap_ctx *ctx, char *payload_dest, int payload_dest_af, char *payload_type, char *payload, int msg_type, uint16_t msg_id_hash)
 {
 	struct sap_ctx_dest *ctx_dest;
@@ -746,7 +768,7 @@ static struct sap_ctx_dest *sap_init_ctx_dest(struct sap_ctx *ctx, char *payload
 	printf("~~~ %s:%i: start, dest: %s\n", __func__, __LINE__, payload_dest);
 	ctx_dest = malloc(sizeof(*ctx_dest));
 	if (!ctx_dest)
-		goto err1;
+		return NULL;
 
 	memset(ctx_dest, 0, sizeof(*ctx_dest));
 	INIT_HLIST_HEAD(&ctx_dest->sessions_list);
@@ -783,8 +805,48 @@ err3:
 	close(ctx_dest->timer_fd);
 err2:
 	free(ctx_dest);
-err1:
 	return NULL;
+}
+
+static void sap_free_ctx_dest(struct sap_ctx_dest *ctx_dest)
+{
+	sap_init_ctx_dest_del_epoll(ctx_dest);
+	free(ctx_dest->message);
+	sap_free_socket(ctx_dest);
+	close(ctx_dest->timer_fd);
+	free(ctx_dest);
+}
+
+static void sap_free_ctx_dests(struct sap_ctx *ctx)
+{
+	struct sap_ctx_dest *ctx_dest;
+
+	hlist_for_each_entry(ctx_dest, &ctx->dest_list, node)
+		sap_free_ctx_dest(ctx_dest);
+}
+
+static int sap_init_ctx_dests(struct sap_ctx *ctx, char *payload_dests[], int payload_dest_af, char *payload_type, char *payload, int msg_type, uint16_t msg_id)
+{
+	struct sap_ctx_dest *ctx_dest;
+	char *dest;
+	int i;
+
+	printf("~~~ %s:%i: here\n", __func__, __LINE__);
+	for (i = 0, dest = payload_dests[i]; dest; dest = payload_dests[++i]) {
+	printf("~~~ %s:%i: here\n", __func__, __LINE__);
+		ctx_dest = sap_init_ctx_dest(ctx, dest, payload_dest_af, payload_type, payload, msg_type, msg_id);
+		if (!ctx_dest)
+			goto err;
+
+		hlist_add_head(&ctx_dest->node, &ctx->dest_list);
+		ctx->num_dests++;
+	}
+
+	ctx->count_max *= ctx->num_dests;
+	return 0;
+err:
+	sap_free_ctx_dests(ctx);
+	return -EINVAL;
 }
 
 /* use this if you need full, customized control, e.g. for debugging (tools) */
@@ -800,14 +862,11 @@ struct sap_ctx *sap_init_custom(
 	unsigned long count,
 	long bw_limit)
 {
-	//char dest[INET6_ADDRSTRLEN];
 	char **payload_dests_tmp = NULL;
-	char *dest;
 	struct sap_ctx *ctx;
-	struct sap_ctx_dest *ctx_dest;
 	char *payload;
-	int ret, sap_af, i;
 	uint16_t msg_id;
+	int ret;
 
 	ctx = malloc(sizeof(*ctx));
 	if (!ctx) {
@@ -830,7 +889,7 @@ struct sap_ctx *sap_init_custom(
 
 	/* disabled limit */
 	if (bw_limit < 0)
-		ctx->bw_limit = ULONG_MAX;
+		ctx->bw_limit = 0;
 	/* default limit */
 	else if (!bw_limit)
 		ctx->bw_limit = SAP_BANDWIDTH_LIMIT;
@@ -856,14 +915,14 @@ struct sap_ctx *sap_init_custom(
 	ret = sap_init_epoll(ctx);
 	if (ret < 0) {
 		errno = -EPERM;
-		goto err5;
+		goto err2;
 	}
 
 	printf("~~~ %s:%i: here, payload_filename: %s\n", __func__, __LINE__, payload_filename);
 	payload = sap_get_payload(payload_filename);
 	if (!payload) {
 		errno = -ENOENT;
-		goto err2;
+		goto err3;
 	}
 
 	if (!payload_dests && !strcmp(payload_type, SAP_PAYLOAD_TYPE_SDP)) {
@@ -874,32 +933,23 @@ struct sap_ctx *sap_init_custom(
 	if (!payload_dests) {
 		errno = -EINVAL;
 		exit(2);
-		goto err3;
+		goto err4;
 	}
 
-	printf("~~~ %s:%i: here\n", __func__, __LINE__);
-	for (i = 0, dest = payload_dests[i]; dest; dest = payload_dests[++i]) {
-	printf("~~~ %s:%i: here\n", __func__, __LINE__);
-		ctx_dest = sap_init_ctx_dest(ctx, dest, payload_dest_af, payload_type, payload, msg_type, msg_id);
-		if (!ctx_dest)
-			goto err5;
-
-		hlist_add_head(&ctx_dest->node, &ctx->dest_list);
-		ctx->num_dests++;
-	}
-
-	ctx->count_max *= ctx->num_dests;
+	ret = sap_init_ctx_dests(ctx, payload_dests, payload_dest_af, payload_type, payload, msg_type, msg_id);
+	if (ret < 0)
+		goto err5;
 
 	free(payload_dests_tmp);
 	free(payload);
 	return ctx;
 
 err5:
-//	close(ctx->sd);
+	free(payload_dests_tmp);
 err4:
-//	free(ctx->message);
-err3:
 	free(payload);
+err3:
+	sap_free_epoll(ctx);
 err2:
 	mtx_destroy(&ctx->thread.ctrl_lock);
 err1:
@@ -915,9 +965,8 @@ struct sap_ctx *sap_init(char *payload_filename)
 
 void sap_free(struct sap_ctx *ctx)
 {
-	close(ctx->epoll.epoll_fd);
-//	close(ctx->sd);
-//	free(ctx->message);
+	sap_free_ctx_dests(ctx);
+	sap_free_epoll(ctx);
 	mtx_destroy(&ctx->thread.ctrl_lock);
 	free(ctx);
 }

@@ -15,7 +15,6 @@
 #include "strtoi_generic.h"
 
 static struct sap_ctx *p_sap_ctx = NULL;
-static int term = 0;
 
 void signal_handler_shutdown(int signum)
 {
@@ -101,8 +100,6 @@ static void get_args(int argc, char *argv[], int *addr_family, char ***dests, un
 {
 	int msg_id_hash_found = 0;
 	int dests_idx = 0;
-//	char **my_dests;
-	unsigned long num;
 	int opt, ret;
 
 	if (argc < 1) {
@@ -224,7 +221,6 @@ int main(int argc, char *argv[])
 	int msg_type = -1;
 	uint16_t msg_id_hash;
 	uint16_t *p_msg_id_hash = &msg_id_hash;
-	int ret;
 	unsigned int interval = 0;
 	int no_jitter = 0;
 	unsigned long count = 0;

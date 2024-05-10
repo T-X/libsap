@@ -55,11 +55,13 @@ static unsigned int sap_get_interval(struct sap_ctx_dest *ctx_dest)
 //	unsigned int interval = SAP_INTERVAL_SEC * 1000;
 	struct sap_ctx *ctx = ctx_dest->ctx;
 	unsigned int interval;
-       	unsigned long bw_used;
+       	unsigned long bw_used = 0;
 	int offset;
 
-	bw_used = 8 * ctx_dest->total_msg_lens / ctx->bw_limit;
-	printf("~~~ %s:%i: : ctx->interval: %lu, bw_used: %lu, total: %zu, bw_limit: %lu\n", __func__, __LINE__, ctx->interval, bw_used, ctx_dest->total_msg_lens, ctx->bw_limit);
+	if (ctx->bw_limit)
+		bw_used = 8 * ctx_dest->total_msg_lens / ctx->bw_limit;
+	printf("~~~ %s:%i: : ctx->interval: %u, bw_used: %lu, total: %zu, bw_limit: %lu\n", __func__, __LINE__, ctx->interval, bw_used, ctx_dest->total_msg_lens, ctx->bw_limit);
+
 	interval = SAP_MAX(ctx->interval, bw_used) * 1000;
 
 	if (ctx->no_jitter)
@@ -80,7 +82,7 @@ static struct itimerspec sap_get_timeout_next(struct sap_ctx_dest *ctx_dest)
 {
 	unsigned int interval = sap_get_interval(ctx_dest);
 	struct itimerspec timer = {
-		.it_interval = 0,
+		.it_interval = { 0 },
 		.it_value = {
 			.tv_sec = interval / 1000,
 			.tv_nsec = (interval % 1000) * (1000*1000)
@@ -102,9 +104,8 @@ static void sap_set_timers_next(struct sap_ctx *ctx)
 {
 	struct sap_ctx_dest *ctx_dest;
 
-	hlist_for_each_entry(ctx_dest, &ctx->dest_list, node) {
+	hlist_for_each_entry(ctx_dest, &ctx->dest_list, node)
 		sap_set_timer_next(ctx_dest);
-	}
 }
 
 static void sap_set_msg_type(struct sap_ctx_dest *ctx_dest, int msg_type)
@@ -122,7 +123,6 @@ static void sap_set_msg_type(struct sap_ctx_dest *ctx_dest, int msg_type)
 static int sap_is_my_source(struct sap_ctx_dest *ctx_dest, union sap_sockaddr_union *addr)
 {
 	union sap_sockaddr_union *src = &ctx_dest->src;
-	struct in6_addr *ip6;
 
 	/* TODO: maybe check for our other SAP destinations, too,
 	 * maybe this looped back? */
@@ -268,7 +268,6 @@ sap_session_get_or_add(struct sap_ctx_dest *ctx_dest, union sap_sockaddr_union *
 	char dest[INET6_ADDRSTRLEN];
 	struct sap_session_entry *session = sap_session_get(ctx_dest, orig_src, msg_id_hash);
 	struct sap_session_entry *new_session;
-	int ret;
 
 	inet_ntop(AF_INET6, &orig_src->in6.sin6_addr, dest, sizeof(dest));
 	printf("~~~ %s:%i: searching: %s, %i, %04x\n", __func__, __LINE__, dest, orig_src->s.sa_family, msg_id_hash);
@@ -276,13 +275,6 @@ sap_session_get_or_add(struct sap_ctx_dest *ctx_dest, union sap_sockaddr_union *
 	/* found */
 	if (session && !sap_session_cmp(session, orig_src, msg_id_hash))
 		return session;
-
-	if (!session)
-		printf("~~~ %s:%i: no session found!\n", __func__, __LINE__);
-	else {
-		inet_ntop(AF_INET6, &session->orig_src.in6.sin6_addr, dest, sizeof(dest));
-		printf("~~~ %s:%i: session found, but not equal (%i): %s, %i, %04x\n", __func__, __LINE__, ret, dest, session->orig_src.s.sa_family, session->msg_id_hash);
-	}
 
 	new_session = sap_session_create(ctx_dest, orig_src, msg_id_hash, msg_len);
 	if (!new_session)
@@ -355,13 +347,10 @@ static int sap_epoll_rx_handler(struct sap_ctx_dest *ctx_dest)
 {
 	char buffer[sizeof(struct sap_packet) + sizeof(struct in6_addr)];
 	struct sap_packet *packet;
-	unsigned int buf_len = sizeof(buffer);
 	union sap_sockaddr_union src = { 0 };
 	union sap_sockaddr_union orig_src;
-	char dest[INET6_ADDRSTRLEN];
 	socklen_t addr_len = sizeof(src);
 	ssize_t msg_len, ret;
-	int flags = 0;
 
 //	printf("~~~ %s:%i: start\n", __func__, __LINE__);
 	printf("~~~ %s:%i: old: total_msg_lens: %lu, num_sessions: %lu\n", __func__, __LINE__, ctx_dest->total_msg_lens, ctx_dest->num_sessions);
@@ -390,6 +379,11 @@ static int sap_epoll_rx_handler(struct sap_ctx_dest *ctx_dest)
 		goto out;
 
 	if (sap_is_my_source(ctx_dest, &orig_src)) {
+		/* TODO: should be a high-availability, redundant sender,
+		 * we should scale back our transmissions accordingly
+		 * (adjust our interval - or just reset our next transmission
+		 * timer?)
+		 */
 	printf("~~~ %s:%i: got own SAP orig source\n", __func__, __LINE__);
 		goto out;
 	}
@@ -498,14 +492,13 @@ static int sap_epoll_tx_handler(struct sap_ctx_dest *ctx_dest)
 	struct sap_ctx *ctx = ctx_dest->ctx;
 	char dest[INET_ADDRSTRLEN];
 	uint64_t res;
-	int ret;
 
 	printf("~~~ %s:%i: start\n", __func__, __LINE__);
 
 	if (ctx_dest->dest.s.sa_family == AF_INET6)
 		inet_ntop(ctx_dest->dest.s.sa_family, &ctx_dest->dest.in6.sin6_addr, dest, sizeof(dest));
 
-	ret = read(ctx_dest->timer_fd, &res, sizeof(res));
+	read(ctx_dest->timer_fd, &res, sizeof(res));
 	printf("~~~ %s:%i: res: %lu, dest: %s\n", __func__, __LINE__, res, dest);
 
 	sap_sessions_timeout(ctx_dest);
@@ -568,10 +561,9 @@ static void sap_terminate_all(struct sap_ctx *ctx)
 
 int sap_run(struct sap_ctx *ctx)
 {
-	unsigned long count = 0;
 	int ret;
 
-	int sfd, timeout = -1, ev_count = -1;
+	int timeout = -1, ev_count = -1;
 
 	sap_set_timers_next(ctx);
 
@@ -606,6 +598,9 @@ int sap_run(struct sap_ctx *ctx)
 		printf("~~~ %s:%i: epoll_wait() returned, ev_count: %i (ctx->term: %i)\n", __func__, __LINE__, ev_count, ctx->term);
 		for(int i = 0; i < ev_count; i++) {
 			ret = sap_epoll_event_handler(&ctx->epoll.events[i]);
+			if (ret < 0)
+				goto out;
+
 			printf("~~~ %s:%i: epoll_wait(), ev: %i, fd: %i (ctx->term: %i)\n", __func__, __LINE__, i, ctx->epoll.events[i].data.fd, ctx->term);
 		}
 
