@@ -820,9 +820,12 @@ static void sap_free_ctx_dest(struct sap_ctx_dest *ctx_dest)
 static void sap_free_ctx_dests(struct sap_ctx *ctx)
 {
 	struct sap_ctx_dest *ctx_dest;
+	struct hlist_node *tmp;
 
-	hlist_for_each_entry(ctx_dest, &ctx->dest_list, node)
+	hlist_for_each_entry_safe(ctx_dest, tmp, &ctx->dest_list, node) {
+		hlist_del(&ctx_dest->node);
 		sap_free_ctx_dest(ctx_dest);
+	}
 }
 
 static int sap_init_ctx_dests(struct sap_ctx *ctx, char *payload_dests[], int payload_dest_af, char *payload_type, char *payload, int msg_type, uint16_t msg_id)
