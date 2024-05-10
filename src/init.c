@@ -446,8 +446,19 @@ static int sap_set_hop_limit(int sd, union sap_sockaddr_union *sap_dst)
 
 static int sap_join_dest4(struct sap_ctx_dest *ctx_dest)
 {
-	/* TODO */
-	return -EINVAL;
+	int ret;
+
+	struct ip_mreqn mreq = {
+		.imr_multiaddr = ctx_dest->dest.in.sin_addr,
+		.imr_address = ctx_dest->src.in.sin_addr,
+		.imr_ifindex = 0,
+	};
+
+	ret = setsockopt(ctx_dest->sd_rx, IPPROTO_IP, IP_ADD_MEMBERSHIP, &mreq,
+			 sizeof(mreq));
+
+	printf("~~~ %s:%i: ret: %i\n", __func__, __LINE__, ret);
+	return ret;
 }
 
 static int sap_join_dest6(struct sap_ctx_dest *ctx_dest)
