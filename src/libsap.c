@@ -59,9 +59,9 @@ static unsigned int sap_get_interval(struct sap_ctx_dest *ctx_dest)
 	int offset;
 
 	if (ctx->bw_limit)
-		bw_used = 8 * ctx_dest->total_msg_lens / ctx->bw_limit;
+		bw_used = 1000 * 8 * ctx_dest->total_msg_lens / ctx->bw_limit;
 
-	interval = SAP_MAX(ctx->interval, bw_used) * 1000;
+	interval = SAP_MAX(ctx->interval * 1000, bw_used);
 
 	if (ctx->no_jitter)
 		return interval;
