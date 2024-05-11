@@ -222,7 +222,7 @@ static int sap_session_cmp(struct sap_session_entry *session,
 	if (ret < 0)
 		return -1;
 	else if (ret > 0)
-		return 0;
+		return 1;
 	
 	if (session->msg_id_hash < msg_id_hash)
 		return -1;
