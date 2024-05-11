@@ -370,7 +370,7 @@ static int sap_epoll_rx_handler(struct sap_ctx_dest *ctx_dest)
 	char buffer[sizeof(struct sap_packet) + sizeof(struct in6_addr)];
 	struct sap_packet *packet;
 	union sap_sockaddr_union src = { 0 };
-	union sap_sockaddr_union orig_src;
+	union sap_sockaddr_union orig_src = { 0 };
 	socklen_t addr_len = sizeof(src);
 	ssize_t msg_len, ret;
 
