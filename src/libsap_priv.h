@@ -96,12 +96,13 @@ struct sap_ctx_dest {
 
 static inline unsigned int sap_ipeth_hdrlen(union sap_sockaddr_union *addr)
 {
+	/* UDP + IP + ETH */
 	switch (addr->s.sa_family) {
 	case AF_INET:
-		return 20 + 14;
+		return 8 + 20 + 14;
 	case AF_INET6:
 	default:
-		return 40 + 14;
+		return 8 + 40 + 14;
 	}
 }
 
