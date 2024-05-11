@@ -368,7 +368,7 @@ static int sap_session_update(struct sap_ctx_dest *ctx_dest,
 static int sap_epoll_rx_handler(struct sap_ctx_dest *ctx_dest)
 {
 	char buffer[sizeof(struct sap_packet) + sizeof(struct in6_addr)];
-	struct sap_packet *packet;
+	struct sap_packet *packet, *my_packet;
 	union sap_sockaddr_union src = { 0 };
 	union sap_sockaddr_union orig_src = { 0 };
 	socklen_t addr_len = sizeof(src);
@@ -379,10 +379,8 @@ static int sap_epoll_rx_handler(struct sap_ctx_dest *ctx_dest)
 	if (ret < sizeof(*packet))
 		goto out;
 
-	if (sap_is_my_source(ctx_dest, &src))
-		goto out;
-
 	packet = (struct sap_packet *)buffer;
+	my_packet = (struct sap_packet *)ctx_dest->message;
 
 	/* RFC2974 says:
 	 * "SAP listeners MAY silently discard messages if the message
@@ -396,19 +394,26 @@ static int sap_epoll_rx_handler(struct sap_ctx_dest *ctx_dest)
 	if (ret < 0)
 		goto out;
 
-	if (sap_is_my_source(ctx_dest, &orig_src))
-		/* TODO: should be a high-availability, redundant sender,
-		 * we should scale back our transmissions accordingly
-		 * (adjust our interval - or just reset our next transmission
-		 * timer?)
-		 */
-		goto out;
-
 	/* RFC2974 says:
 	 * "SAP listeners MAY silently discard packets with the originating
 	 *  source set to zero."
 	 */
 	if (sap_is_zero_address(&orig_src))
+		goto out;
+
+	/* ignore our own packets */
+	if (sap_is_my_source(ctx_dest, &src) &&
+	    sap_is_my_source(ctx_dest, &orig_src) &&
+	    packet->msg_id_hash == my_packet->msg_id_hash)
+		goto out;
+
+	if (sap_is_my_source(ctx_dest, &orig_src) &&
+	    packet->msg_id_hash == my_packet->msg_id_hash)
+		/* TODO: should be a high-availability, redundant sender,
+		 * we should scale back our transmissions accordingly
+		 * (adjust our interval - or just reset our next transmission
+		 * timer?)
+		 */
 		goto out;
 
 	msg_len = recv(ctx_dest->sd_rx, buffer, 0, MSG_PEEK | MSG_TRUNC);
