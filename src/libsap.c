@@ -246,12 +246,12 @@ sap_session_get(struct sap_ctx_dest *ctx_dest,
 			return session;
 
 		if (ret > 0)
-			return prev;
+			break;
 
 		prev = session;
 	}
 
-	return session;
+	return prev;
 }
 
 static struct sap_session_entry *
