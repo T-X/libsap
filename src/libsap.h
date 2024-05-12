@@ -7,6 +7,8 @@
 #include <stdint.h>
 
 struct sap_ctx *sap_init_custom(char *payload_dests[],
+				char *sap_dests[],
+				int disable_dests_from_sdp,
 				int payload_dest_af,
 				char *payload_filename,
 				char *payload_type,

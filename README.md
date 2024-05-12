@@ -33,6 +33,8 @@ Options:
     -h                                  This help page
 
 Debug options: (typ. not RFC compliant)
+    -D                                  Disable payload destination from SDP detection
+    -S <address|hostname>               SAP destination (default: from payload destinations only)
     -t <type>                           Payload type (default: "application/sdp")
     -T <announce|terminate>             Message type, sets debug mode (default: standard/daemon mode)
     -I <msg-id-hash>                    Message ID hash (default: random)

@@ -293,10 +293,10 @@ static int sap_get_payload_dests_num(const char *payload)
 	return num_dests;
 }
 
-static char **sap_get_payload_dests(const char *payload)
+static char **sap_get_payload_dests(const char *payload, char **dests_store)
 {
 	int num_dests = sap_get_payload_dests_num(payload);
-	char *dests_store;
+	char *dests_store_tmp;
 	char **dests = NULL;
 	char *dest;
 	int ret;
@@ -304,8 +304,8 @@ static char **sap_get_payload_dests(const char *payload)
 	if (!num_dests)
 		return NULL;
 
-	dests_store = calloc(num_dests, INET6_ADDRSTRLEN);
-	if (!dests_store)
+	dests_store_tmp = calloc(num_dests, INET6_ADDRSTRLEN);
+	if (!dests_store_tmp)
 		return NULL;
 
 	dests = calloc(num_dests + 1, sizeof(*dests));
@@ -313,7 +313,7 @@ static char **sap_get_payload_dests(const char *payload)
 		goto err;
 
 	for (int i = 0; i < num_dests; i++) {
-		dest = dests_store + i * INET6_ADDRSTRLEN;
+		dest = dests_store_tmp + i * INET6_ADDRSTRLEN;
 		dests[i] = dest;
 
 		ret = sap_get_payload_dest(payload, dest, &payload);
@@ -322,9 +322,10 @@ static char **sap_get_payload_dests(const char *payload)
 			goto err;
 	}
 
+	*dests_store = dests_store_tmp;
 	return dests;
 err:
-	free(dests_store);
+	free(dests_store_tmp);
 	free(dests);
 	return NULL;
 }
@@ -404,8 +405,12 @@ static int sap_compress_payload(char **payload, size_t *payload_len,
 #endif
 
 static int sap_get_ip4_dst(const struct sockaddr_in *pay_dst,
-			   struct sockaddr_in *sap_dst)
+			   struct sockaddr_in *sap_dst,
+			   int pay_to_sap_dest)
 {
+	in_addr_t pdst = ntohl(pay_dst->sin_addr.s_addr);
+	struct in_addr dst;
+
 	/* TODOs/open questions:
 	 * 1) from the static global scope (224.0.1.0 - 238.255.255.255),
 	 * should only 224.2.128.0 - 224.2.255.255 be accepted?
@@ -415,23 +420,26 @@ static int sap_get_ip4_dst(const struct sockaddr_in *pay_dst,
 	 * through MZAP (RFC2776) instead? All these ranges
 	 * (except 239.255.0.0/16, local scope) seem further divisible.
 	 */
-	in_addr_t pdst = ntohl(pay_dst->sin_addr.s_addr);
-	struct in_addr dst;
-
-	/* 224.0.0.0/24 (v6 scope ID: 2) -> 224.0.0.255 */
-	if (IN_MC_LINK_LOCAL(pdst))
-		dst.s_addr = IN_MC_SAP_LINK_LOCAL;
-	/* 239.255.0.0/16 (v6 scope ID: 3) -> 239.255.255.255 */
-	else if (IN_MC_LOCAL(pdst))
-		dst.s_addr = IN_MC_SAP_LOCAL;
-	/* 239.192.0.0/14 (v6 scope ID: 8) -> 239.195.255.255 */
-	else if (IN_MC_ORG_LOCAL(pdst))
-		dst.s_addr = IN_MC_SAP_ORG_LOCAL;
-	/* 224.0.1.0 - 238.255.255.255 (v6 scope ID: e) -> 224.2.127.254 */
-	else if (IN_MC_GLOBAL(pdst))
-		dst.s_addr = IN_MC_SAP_GLOBAL;
-	else
-		return -EINVAL;
+	if (pay_to_sap_dest) {
+		/* 224.0.0.0/24 (v6 scope ID: 2) -> 224.0.0.255 */
+		if (IN_MC_LINK_LOCAL(pdst))
+			dst.s_addr = IN_MC_SAP_LINK_LOCAL;
+		/* 239.255.0.0/16 (v6 scope ID: 3) -> 239.255.255.255 */
+		else if (IN_MC_LOCAL(pdst))
+			dst.s_addr = IN_MC_SAP_LOCAL;
+		/* 239.192.0.0/14 (v6 scope ID: 8) -> 239.195.255.255 */
+		else if (IN_MC_ORG_LOCAL(pdst))
+			dst.s_addr = IN_MC_SAP_ORG_LOCAL;
+		/* 224.0.1.0 - 238.255.255.255 (v6 scope ID: e)
+		 * -> 224.2.127.254
+		 */
+		else if (IN_MC_GLOBAL(pdst))
+			dst.s_addr = IN_MC_SAP_GLOBAL;
+		else
+			return -EINVAL;
+	} else {
+		dst.s_addr = pdst;
+	}
 
 	sap_dst->sin_family = pay_dst->sin_family;
 	sap_dst->sin_addr.s_addr = htonl(dst.s_addr);
@@ -441,28 +449,35 @@ static int sap_get_ip4_dst(const struct sockaddr_in *pay_dst,
 }
 
 static int sap_get_ip6_dst(const struct sockaddr_in6 *pay_dst,
-			   struct sockaddr_in6 *sap_dst)
+			   struct sockaddr_in6 *sap_dst,
+			   int pay_to_sap_dest)
 {
 	/* TODOs/open questions:
 	 * Should we really accept unicast payload destinations here?
 	 * (VLC does?)
 	 */
-	struct in6_addr dst = { .s6_addr = { 0xff, 0, 0, 0,
-					     0, 0, 0, 0,
-				  	     0, 0, 0, 0,
-					     0, 0x02, 0x7f, 0xfe } };
+	struct in6_addr dst;
 
-	if (IN6_IS_ADDR_MULTICAST(&pay_dst->sin6_addr))
-		/* adopt scope */
-		dst.s6_addr[1] = (0x0f & pay_dst->sin6_addr.s6_addr[1]);
-	/* unicast (not really part of the SAP specification?) */
-	else if (IN6_IS_ADDR_LINKLOCAL(&pay_dst->sin6_addr))
-		/* link-local scope */
-		dst.s6_addr[1] = 0x02;
-	/* TODO: is this correct? this is what VLC does */
-	else
-		/* global scope */
-		dst.s6_addr[1] = 0x0e;
+	if (pay_to_sap_dest) {
+		dst = (struct in6_addr){ .s6_addr = { 0xff, 0, 0, 0,
+						      0, 0, 0, 0,
+						      0, 0, 0, 0,
+						      0, 0x02, 0x7f, 0xfe } };
+
+		if (IN6_IS_ADDR_MULTICAST(&pay_dst->sin6_addr))
+			/* adopt scope */
+			dst.s6_addr[1] = (0x0f & pay_dst->sin6_addr.s6_addr[1]);
+		/* unicast (not really part of the SAP specification?) */
+		else if (IN6_IS_ADDR_LINKLOCAL(&pay_dst->sin6_addr))
+			/* link-local scope */
+			dst.s6_addr[1] = 0x02;
+		/* TODO: is this correct? this is what VLC does */
+		else
+			/* global scope */
+			dst.s6_addr[1] = 0x0e;
+	} else {
+		dst = pay_dst->sin6_addr;
+	}
 
 	sap_dst->sin6_family = pay_dst->sin6_family;
 	sap_dst->sin6_addr = dst;
@@ -474,15 +489,16 @@ static int sap_get_ip6_dst(const struct sockaddr_in6 *pay_dst,
 }
 
 static int sap_get_ip_dst(union sap_sockaddr_union *addr,
-			  union sap_sockaddr_union *sap_dst)
+			  union sap_sockaddr_union *sap_dst,
+			  int pay_to_sap_dest)
 {
 	switch (addr->s.sa_family) {
 	case AF_INET:
-		return sap_get_ip4_dst(&addr->in,
-				       &sap_dst->in);
+		return sap_get_ip4_dst(&addr->in, &sap_dst->in,
+				       pay_to_sap_dest);
 	case AF_INET6:
-		return sap_get_ip6_dst(&addr->in6,
-				       &sap_dst->in6);
+		return sap_get_ip6_dst(&addr->in6, &sap_dst->in6,
+				       pay_to_sap_dest);
 	}
 
 	return -EPROTONOSUPPORT;
@@ -608,7 +624,7 @@ err:
 }
 
 static int sap_create_socket(struct sap_ctx_dest *ctx_dest, char *pay_dst,
-			     int af_hint)
+			     int pay_to_sap_dest, int af_hint)
 {
 	union sap_sockaddr_union sap_dst = { 0 };
 	union sap_sockaddr_union ai_addr;
@@ -639,7 +655,7 @@ static int sap_create_socket(struct sap_ctx_dest *ctx_dest, char *pay_dst,
 			break;
 
 		memcpy(&ai_addr, p->ai_addr, p->ai_addrlen);
-		ret = sap_get_ip_dst(&ai_addr, &sap_dst);
+		ret = sap_get_ip_dst(&ai_addr, &sap_dst, pay_to_sap_dest);
 		if (ret < 0)
 			break;
 
@@ -827,9 +843,10 @@ static void sap_init_ctx_dest_del_epoll(struct sap_ctx_dest *ctx_dest)
 }
 
 static struct sap_ctx_dest *
-sap_init_ctx_dest(struct sap_ctx *ctx, char *payload_dest, int payload_dest_af,
-		  char *payload_type, char *payload, size_t payload_len,
-		  int compressed, int msg_type, uint16_t msg_id_hash)
+sap_init_ctx_dest(struct sap_ctx *ctx, char *dest, int pay_to_sap_dest,
+		  int dest_af, char *payload_type, char *payload,
+		  size_t payload_len, int compressed, int msg_type,
+		  uint16_t msg_id_hash)
 {
 	struct sap_ctx_dest *ctx_dest;
 	int ret;
@@ -850,7 +867,7 @@ sap_init_ctx_dest(struct sap_ctx *ctx, char *payload_dest, int payload_dest_af,
 	if (ctx_dest->timer_fd < 0)
 		goto err1;
 
-	ret = sap_create_socket(ctx_dest, payload_dest, payload_dest_af);
+	ret = sap_create_socket(ctx_dest, dest, pay_to_sap_dest, dest_af);
 	if (ret < 0)
 		goto err2;
 
@@ -895,37 +912,40 @@ static void sap_free_ctx_dests(struct sap_ctx *ctx)
 	}
 }
 
-static int sap_init_ctx_dests(struct sap_ctx *ctx, char *payload_dests[],
-			      int payload_dest_af, char *payload_type,
-			      char *payload, size_t payload_len, int compressed,
-			      int msg_type, uint16_t msg_id)
+static int sap_init_ctx_dests(struct sap_ctx *ctx, char *dests[],
+			      int pay_to_sap_dest, int dest_af,
+			      char *payload_type, char *payload,
+			      size_t payload_len, int compressed, int msg_type,
+			      uint16_t msg_id)
 {
 	struct sap_ctx_dest *ctx_dest;
 	char *dest;
 	int i;
 
-	for (i = 0, dest = payload_dests[i]; dest; dest = payload_dests[++i]) {
-		ctx_dest = sap_init_ctx_dest(ctx, dest, payload_dest_af,
-					     payload_type, payload, payload_len,
-					     compressed, msg_type, msg_id);
+	if (!dests)
+		return 0;
+
+	for (i = 0, dest = dests[i]; dest; dest = dests[++i]) {
+		ctx_dest = sap_init_ctx_dest(ctx, dest, pay_to_sap_dest,
+					     dest_af, payload_type, payload,
+					     payload_len, compressed, msg_type,
+					     msg_id);
 		if (!ctx_dest)
-			goto err;
+			return -EINVAL;
 
 		hlist_add_head(&ctx_dest->node, &ctx->dest_list);
 		ctx->num_dests++;
 	}
 
-	ctx->count_max *= ctx->num_dests;
 	return 0;
-err:
-	sap_free_ctx_dests(ctx);
-	return -EINVAL;
 }
 
 /* use this if you need full, customized control, e.g. for debugging (tools) */
 struct sap_ctx *sap_init_custom(
 	char *payload_dests[],
-	int payload_dest_af,
+	char *sap_dests[],
+	int disable_dests_from_sdp,
+	int dest_af,
 	char *payload_filename,
 	char *payload_type,
 	int enable_compression,
@@ -936,7 +956,8 @@ struct sap_ctx *sap_init_custom(
 	unsigned long count,
 	long bw_limit)
 {
-	char **payload_dests_tmp = NULL;
+	char **sdp_dests = NULL;
+	char *sdp_dests_store = NULL;
 	struct sap_ctx *ctx;
 	char *payload;
 	size_t payload_len;
@@ -994,18 +1015,15 @@ struct sap_ctx *sap_init_custom(
 
 	payload = sap_get_payload(payload_filename, &payload_len);
 	if (!payload) {
-		errno = -ENOENT;
+		errno = -ENODATA;
 		goto err3;
 	}
 
-	if (!payload_dests && !strcmp(payload_type, SAP_PAYLOAD_TYPE_SDP)) {
-		payload_dests_tmp = sap_get_payload_dests(payload);
-		payload_dests = payload_dests_tmp;
-	}
-	if (!payload_dests) {
-		errno = -EINVAL;
-		exit(2);
-		goto err4;
+	if (!disable_dests_from_sdp &&
+	    !strcmp(payload_type, SAP_PAYLOAD_TYPE_SDP)) {
+		sdp_dests = sap_get_payload_dests(payload, &sdp_dests_store);
+		if (!sdp_dests)
+			goto err4;
 	}
 
 	if (enable_compression >= 0) {
@@ -1020,18 +1038,47 @@ struct sap_ctx *sap_init_custom(
 		enable_compression = 0;
 	}
 
-	ret = sap_init_ctx_dests(ctx, payload_dests, payload_dest_af,
-				 payload_type, payload, payload_len,
-				 enable_compression, msg_type, msg_id);
-	if (ret < 0)
-		goto err5;
+	ret = sap_init_ctx_dests(ctx, sdp_dests, 1, dest_af, payload_type,
+				 payload, payload_len, enable_compression,
+				 msg_type, msg_id);
+	if (ret < 0) {
+		errno = ret;
+		goto err6;
+	}
 
-	free(payload_dests_tmp);
+	ret = sap_init_ctx_dests(ctx, payload_dests, 1, dest_af, payload_type,
+				 payload, payload_len, enable_compression,
+				 msg_type, msg_id);
+	if (ret < 0) {
+		errno = ret;
+		goto err6;
+	}
+
+	ret = sap_init_ctx_dests(ctx, sap_dests, 0, dest_af, payload_type,
+				 payload, payload_len, enable_compression,
+				 msg_type, msg_id);
+	if (ret < 0) {
+		errno = ret;
+		goto err6;
+	}
+
+	if (!ctx->num_dests) {
+		errno = -ENOENT;
+		goto err6;
+	}
+
+	ctx->count_max *= ctx->num_dests;
+
+	free(sdp_dests);
+	free(sdp_dests_store);
 	free(payload);
 	return ctx;
 
+err6:
+	sap_free_ctx_dests(ctx);
 err5:
-	free(payload_dests_tmp);
+	free(sdp_dests);
+	free(sdp_dests_store);
 err4:
 	free(payload);
 err3:
@@ -1046,15 +1093,15 @@ err1:
 /* not quite RFC2974 compliant, but more responsive alternative to sap_init() */
 struct sap_ctx *sap_init_fast(char *payload_filename)
 {
-	return sap_init_custom(NULL, AF_UNSPEC, payload_filename, NULL, 0, -1,
-			       NULL, 5, 0, 0, 0);
+	return sap_init_custom(NULL, NULL, 0, AF_UNSPEC, payload_filename, NULL,
+			       0, -1, NULL, 5, 0, 0, 0);
 }
 
 /* use this for fully RFC2974 compliant execution, e.g. for daemons */
 struct sap_ctx *sap_init(char *payload_filename)
 {
-	return sap_init_custom(NULL, AF_UNSPEC, payload_filename, NULL, 0, -1,
-			       NULL, 0, 0, 0, 0);
+	return sap_init_custom(NULL, NULL, 0, AF_UNSPEC, payload_filename, NULL,
+			       0, -1, NULL, 0, 0, 0, 0);
 }
 
 void sap_free(struct sap_ctx *ctx)

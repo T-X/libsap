@@ -62,6 +62,8 @@ static void usage(char *prog)
 	printf("    -h                                  This help page\n");
 	printf("\n");
 	printf("Debug options: (typ. not RFC compliant)\n");
+	printf("    -D                                  Disable payload destination from SDP detection\n");
+	printf("    -S <address|hostname>               SAP destination (default: from payload destinations only)\n");
 	printf("    -t <type>                           Payload type (default: \"application/sdp\")\n");
 	printf("    -T <announce|terminate>             Message type, sets debug mode (default: standard/daemon mode)\n");
 	printf("    -I <msg-id-hash>                    Message ID hash (default: random)\n");
@@ -73,19 +75,16 @@ static void usage(char *prog)
 //	printf("    -m <bytes>                          Packet MTU (default: min(1000, iface-MTU))\n");
 }
 
-char *getopt_args_fmt = "46d:p:t:T:I:i:Jc:b:Cm:h";
+char *getopt_args_fmt = "46d:S:Dp:t:T:I:i:Jc:b:Cm:h";
 
-static unsigned int get_num_dests(int argc, char *argv[])
+static unsigned int get_num_dests(int argc, char *argv[], char type)
 {
 	unsigned int num_dests = 0;
 	int opt;
 
 	while ((opt = getopt(argc, argv, getopt_args_fmt)) != -1) {
-		switch (opt) {
-		case 'd':
+		if (opt == type)
 			num_dests++;
-			break;
-		}
 	}
 
 	optind = 1;
@@ -96,8 +95,11 @@ static unsigned int get_num_dests(int argc, char *argv[])
 static void get_args(int argc,
 		     char *argv[],
 		     int *addr_family,
-		     char ***dests,
-		     unsigned int num_dests,
+		     char ***payload_dests,
+		     unsigned int num_payload_dests,
+		     char ***sap_dests,
+		     unsigned int num_sap_dests,
+		     int *disable_dests_from_sdp,
 		     char **payload_filename,
 		     char **payload_type,
 		     int *enable_compression,
@@ -109,7 +111,8 @@ static void get_args(int argc,
 		     long *bw_limit)
 {
 	int msg_id_hash_found = 0;
-	int dests_idx = 0;
+	int payload_dests_idx = 0;
+	int sap_dests_idx = 0;
 	int opt, ret;
 
 	if (argc < 1) {
@@ -118,12 +121,24 @@ static void get_args(int argc,
 		exit(1);
 	}
 
-	if (num_dests) {
+	if (num_payload_dests) {
 		/* one more element with NULL to point to the end */
-		*dests = calloc(num_dests + 1, sizeof(*dests));
-		if (!*dests) {
+		*payload_dests = calloc(num_payload_dests + 1,
+					sizeof(*payload_dests));
+		if (!*payload_dests) {
 			fprintf(stderr,
-				"Error: Could not allocate destinations\n");
+				"Error: Could not allocate payload destinations\n");
+			usage(argv[0]);
+			exit(1);
+		}
+	}
+
+	if (num_sap_dests) {
+		/* one more element with NULL to point to the end */
+		*sap_dests = calloc(num_sap_dests + 1, sizeof(*sap_dests));
+		if (!*sap_dests) {
+			fprintf(stderr,
+				"Error: Could not allocate SAP destinations\n");
 			usage(argv[0]);
 			exit(1);
 		}
@@ -144,7 +159,13 @@ static void get_args(int argc,
 				*addr_family = AF_INET6;
 			break;
 		case 'd':
-			(*dests)[dests_idx++] = optarg;
+			(*payload_dests)[payload_dests_idx++] = optarg;
+			break;
+		case 'S':
+			(*sap_dests)[sap_dests_idx++] = optarg;
+			break;
+		case 'D':
+			*disable_dests_from_sdp = 1;
 			break;
 		case 'p':
 			if (!strcmp("-", optarg))
@@ -236,8 +257,11 @@ static void get_args(int argc,
 
 int main(int argc, char *argv[])
 {
-	unsigned int num_dests = get_num_dests(argc, argv);
-	char **dests = NULL;
+	int num_payload_dests = get_num_dests(argc, argv, 'd');
+	int num_sap_dests = get_num_dests(argc, argv, 'S');
+	char **payload_dests = NULL;
+	char **sap_dests = NULL;
+	int disable_dests_from_sdp = 0;
 	int addr_family = AF_UNSPEC;
 	char *payload_type = NULL;
 	char *payload_filename = NULL;
@@ -251,14 +275,16 @@ int main(int argc, char *argv[])
 	long bw_limit = 0;
 	int enable_compression = 0;
 
-	get_args(argc, argv, &addr_family, &dests, num_dests, &payload_filename,
-		 &payload_type, &enable_compression, &msg_type, &p_msg_id_hash,
-		 &interval, &no_jitter, &count, &bw_limit);
+	get_args(argc, argv, &addr_family, &payload_dests, num_payload_dests,
+		 &sap_dests, num_sap_dests, &disable_dests_from_sdp,
+		 &payload_filename, &payload_type, &enable_compression,
+		 &msg_type, &p_msg_id_hash, &interval, &no_jitter, &count,
+		 &bw_limit);
 
-	ctx = sap_init_custom(dests, addr_family, payload_filename,
-			      payload_type, enable_compression, msg_type,
-			      p_msg_id_hash, interval, no_jitter, count,
-			      bw_limit);
+	ctx = sap_init_custom(payload_dests, sap_dests, disable_dests_from_sdp,
+			      addr_family, payload_filename, payload_type,
+			      enable_compression, msg_type, p_msg_id_hash,
+			      interval, no_jitter, count, bw_limit);
 	if (!ctx) {
 		usage(argv[0]);
 		exit(1);
