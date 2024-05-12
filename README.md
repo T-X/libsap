@@ -29,6 +29,7 @@ Options:
     -d <address|hostname>               Payload's destination (default: from c= in SDP payload)
     -p <file|fifo|->                    Payload file (default: -)
     -b <bw-limit>                       Total bits/s for all sessions in an SAP group (default: 4000)
+    -C                                  Disable compression
     -h                                  This help page
 
 Debug options: (typ. not RFC compliant)
@@ -75,6 +76,11 @@ sizes. And we assume that they use the same bandwidth limit and interval
 settings as we do.
 
 Defaults to 4000 (bits/s).
+
+**-C:**
+
+Disable the SAP zlib compression feature, transfer the payload and
+payload type uncompressed, in plaintext.
 
 Debug options:
 

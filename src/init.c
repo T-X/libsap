@@ -1,6 +1,8 @@
 /* SPDX-FileCopyrightText: 2024 Linus Lüssing <linus.luessing@c0d3.blue> */
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 
+#include <config.h>
+
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
@@ -10,6 +12,9 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/timerfd.h>
+#ifdef HAVE_ZLIB_H
+	#include <zlib.h>
+#endif
 
 #include <arpa/inet.h> // inet_ntop()
 
@@ -172,12 +177,12 @@ static void sap_free_epoll(struct sap_ctx *ctx)
 	close(ctx->epoll.epoll_fd);
 }
 
-static char *sap_get_payload(char *payload_filename)
+static char *sap_get_payload(char *payload_filename, size_t *payload_len)
 {
 	char *payload = NULL;
 	FILE *file;
 	long size;
-	int ret;
+	int ret, len;
 
 	if (!payload_filename || !strcmp("-", payload_filename))
 		file = stdin;
@@ -206,11 +211,13 @@ static char *sap_get_payload(char *payload_filename)
 
 	memset(payload, 0, size + 1);
 
-	fread(payload, size, 1, file);
+	len = fread(payload, 1, size, file);
 	if (ferror(file)) {
 		free(payload);
 		payload = NULL;
 	}
+
+	*payload_len = len;
 
 err1:
 	if (file != stdin)
@@ -321,6 +328,80 @@ err:
 	free(dests);
 	return NULL;
 }
+
+#ifdef HAVE_ZLIB
+static int sap_compress_chunk(z_stream *zstream, char *chunk,
+			      size_t chunk_len, int flush)
+{
+	int ret;
+
+	zstream->avail_in = chunk_len;
+	zstream->next_in = (unsigned char *)chunk;
+
+	ret = deflate(zstream, flush);
+	if (ret == Z_STREAM_ERROR ||
+	    ret == Z_BUF_ERROR)
+		return -EINVAL;
+
+	return 0;
+}
+
+static int sap_compress_payload(char **payload, size_t *payload_len,
+				char *payload_type)
+{
+	/* compressing should make it smaller... but let's tolerate (a very
+	 * unlikely) up to 20% size increase, to keep this code simple
+	 */
+	size_t payload_type_len = strlen(payload_type) + 1;
+	size_t output_len;
+	z_stream zstream;
+	int ret;
+	char *output;
+
+	memset(&zstream, 0, sizeof(zstream));
+
+	ret = deflateInit(&zstream, 9);
+	if (ret != Z_OK)
+		return -ENOMEM;
+
+	output_len = deflateBound(&zstream, *payload_len + payload_type_len);
+
+	output = malloc(output_len);
+	if (!output) {
+		ret = -ENOMEM;
+		goto err1;
+	}
+
+	memset(output, 0, output_len);
+	zstream.avail_out = output_len;
+	zstream.next_out = (unsigned char *)output;
+
+	ret = sap_compress_chunk(&zstream, payload_type, payload_type_len,
+				 Z_NO_FLUSH);
+	if (ret < 0)
+		goto err2;
+
+	ret = sap_compress_chunk(&zstream, *payload, *payload_len, Z_FINISH);
+	if (ret < 0)
+		goto err2;
+
+	free(*payload);
+	*payload = output;
+	*payload_len = output_len - zstream.avail_out;
+	output = NULL;
+err2:
+	free(output);
+err1:
+	deflateEnd(&zstream);
+	return ret;
+}
+#else
+static int sap_compress_payload(char **payload, size_t *payload_len,
+				char *payload_type)
+{
+	return -ENOTSUP;
+}
+#endif
 
 static int sap_get_ip4_dst(const struct sockaddr_in *pay_dst,
 			   struct sockaddr_in *sap_dst)
@@ -588,7 +669,7 @@ static void sap_free_socket(struct sap_ctx_dest *ctx_dest)
 	close(ctx_dest->sd_rx);
 }
 
-static uint8_t sap_get_flags(int sap_af, int msg_type)
+static uint8_t sap_get_flags(int sap_af, int compressed, int msg_type)
 {
 	/* V=1: SAPv1/SAPv2 */
 	uint8_t flags = SAP_FLAG_VERSION;
@@ -596,6 +677,9 @@ static uint8_t sap_get_flags(int sap_af, int msg_type)
 	/* A: address type */
 	if (sap_af == AF_INET6)
 		flags |= SAP_FLAG_IPV6;
+
+	if (compressed)
+		flags |= SAP_FLAG_COMPRESSED;
 
 	if (msg_type == SAP_TERMINATE)
 		flags |= SAP_FLAG_TERMINATE;
@@ -627,31 +711,36 @@ static char *sap_push_auth_data(char *msg)
 	return msg;
 }
 
-static char *sap_push_payload_type(char *msg, const char *payload_type)
+static char *sap_push_payload_type(char *msg, const char *payload_type,
+				   int compressed)
 {
 	size_t len = strlen(payload_type);
 
-	if (!msg)
+	if (!msg || compressed)
+		return msg;
+
+	/* sanity check, should not happen */
+	if (!payload_type)
 		return msg;
 
 	strcpy(msg, payload_type);
 	return msg + len + 1;
 }
 
-static char *sap_push_payload(char *msg, const char *payload)
+static char *sap_push_payload(char *msg, const char *payload,
+			      size_t payload_len)
 {
-	/* TODO: compression and encryption options */
-	size_t len = strlen(payload);
-
+	/* TODO: encryption options */
 	if (!msg)
 		return msg;
 
-	memcpy(msg, payload, len);
-	return msg + len;
+	memcpy(msg, payload, payload_len);
+	return msg + payload_len;
 }
 
 static void sap_create_message(struct sap_ctx_dest *ctx_dest,
-			       const char *payload, const char *payload_type,
+			       const char *payload, size_t payload_len,
+			       const char *payload_type, int compressed,
 			       int msg_type, uint16_t msg_id_hash)
 {
 	int sap_af = ctx_dest->dest.s.sa_family;
@@ -659,7 +748,7 @@ static void sap_create_message(struct sap_ctx_dest *ctx_dest,
 	char *msg;
 
 	struct sap_packet packet = {
-		.flags = sap_get_flags(sap_af, msg_type),
+		.flags = sap_get_flags(sap_af, compressed, msg_type),
 		.auth_len = 0,
 		.msg_id_hash = msg_id_hash,
 	};
@@ -674,7 +763,8 @@ static void sap_create_message(struct sap_ctx_dest *ctx_dest,
 	}
 
 	len = sizeof(packet) + orig_source_len + packet.auth_len;
-       	len += strlen(payload_type) + 1 + strlen(payload);
+	len += !compressed ? strlen(payload_type) + 1 : 0;
+	len += payload_len;
 
 	msg = malloc(len);
 	if (!msg)
@@ -689,8 +779,8 @@ static void sap_create_message(struct sap_ctx_dest *ctx_dest,
 
 	msg = sap_push_orig_source(ctx_dest, msg);
 	msg = sap_push_auth_data(msg);
-	msg = sap_push_payload_type(msg, payload_type);
-	msg = sap_push_payload(msg, payload);
+	msg = sap_push_payload_type(msg, payload_type, compressed);
+	msg = sap_push_payload(msg, payload, payload_len);
 
 	if (msg - ctx_dest->message != len) {
 		free(ctx_dest->message);
@@ -738,8 +828,8 @@ static void sap_init_ctx_dest_del_epoll(struct sap_ctx_dest *ctx_dest)
 
 static struct sap_ctx_dest *
 sap_init_ctx_dest(struct sap_ctx *ctx, char *payload_dest, int payload_dest_af,
-		  char *payload_type, char *payload, int msg_type,
-		  uint16_t msg_id_hash)
+		  char *payload_type, char *payload, size_t payload_len,
+		  int compressed, int msg_type, uint16_t msg_id_hash)
 {
 	struct sap_ctx_dest *ctx_dest;
 	int ret;
@@ -764,7 +854,8 @@ sap_init_ctx_dest(struct sap_ctx *ctx, char *payload_dest, int payload_dest_af,
 	if (ret < 0)
 		goto err2;
 
-	sap_create_message(ctx_dest, payload, payload_type, msg_type, msg_id_hash);
+	sap_create_message(ctx_dest, payload, payload_len, payload_type,
+			   compressed, msg_type, msg_id_hash);
 	if (!ctx_dest->message)
 		goto err3;
 
@@ -806,7 +897,8 @@ static void sap_free_ctx_dests(struct sap_ctx *ctx)
 
 static int sap_init_ctx_dests(struct sap_ctx *ctx, char *payload_dests[],
 			      int payload_dest_af, char *payload_type,
-			      char *payload, int msg_type, uint16_t msg_id)
+			      char *payload, size_t payload_len, int compressed,
+			      int msg_type, uint16_t msg_id)
 {
 	struct sap_ctx_dest *ctx_dest;
 	char *dest;
@@ -814,8 +906,8 @@ static int sap_init_ctx_dests(struct sap_ctx *ctx, char *payload_dests[],
 
 	for (i = 0, dest = payload_dests[i]; dest; dest = payload_dests[++i]) {
 		ctx_dest = sap_init_ctx_dest(ctx, dest, payload_dest_af,
-					     payload_type, payload, msg_type,
-					     msg_id);
+					     payload_type, payload, payload_len,
+					     compressed, msg_type, msg_id);
 		if (!ctx_dest)
 			goto err;
 
@@ -836,6 +928,7 @@ struct sap_ctx *sap_init_custom(
 	int payload_dest_af,
 	char *payload_filename,
 	char *payload_type,
+	int enable_compression,
 	int msg_type,
 	uint16_t *msg_id_hash,
 	unsigned int interval,
@@ -846,6 +939,7 @@ struct sap_ctx *sap_init_custom(
 	char **payload_dests_tmp = NULL;
 	struct sap_ctx *ctx;
 	char *payload;
+	size_t payload_len;
 	uint16_t msg_id;
 	int ret;
 
@@ -898,7 +992,7 @@ struct sap_ctx *sap_init_custom(
 		goto err2;
 	}
 
-	payload = sap_get_payload(payload_filename);
+	payload = sap_get_payload(payload_filename, &payload_len);
 	if (!payload) {
 		errno = -ENOENT;
 		goto err3;
@@ -914,8 +1008,21 @@ struct sap_ctx *sap_init_custom(
 		goto err4;
 	}
 
+	if (enable_compression >= 0) {
+		ret = sap_compress_payload(&payload, &payload_len,
+					   payload_type);
+		/* ok */
+		if (!ret)
+			enable_compression = 1;
+		else if (enable_compression || ret != -ENOTSUP)
+			goto err5;
+	} else {
+		enable_compression = 0;
+	}
+
 	ret = sap_init_ctx_dests(ctx, payload_dests, payload_dest_af,
-				 payload_type, payload, msg_type, msg_id);
+				 payload_type, payload, payload_len,
+				 enable_compression, msg_type, msg_id);
 	if (ret < 0)
 		goto err5;
 
@@ -939,14 +1046,14 @@ err1:
 /* not quite RFC2974 compliant, but more responsive alternative to sap_init() */
 struct sap_ctx *sap_init_fast(char *payload_filename)
 {
-	return sap_init_custom(NULL, AF_UNSPEC, payload_filename, NULL, -1,
+	return sap_init_custom(NULL, AF_UNSPEC, payload_filename, NULL, 0, -1,
 			       NULL, 5, 0, 0, 0);
 }
 
 /* use this for fully RFC2974 compliant execution, e.g. for daemons */
 struct sap_ctx *sap_init(char *payload_filename)
 {
-	return sap_init_custom(NULL, AF_UNSPEC, payload_filename, NULL, -1,
+	return sap_init_custom(NULL, AF_UNSPEC, payload_filename, NULL, 0, -1,
 			       NULL, 0, 0, 0, 0);
 }
 

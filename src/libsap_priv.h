@@ -17,6 +17,7 @@
 #define SAP_EPOLL_MAX_EVENTS 32
 
 #define BIT(n) (1 << n)
+#define SAP_FLAG_COMPRESSED (BIT(0))
 #define SAP_FLAG_TYPE (BIT(2))
 #define SAP_FLAG_TERMINATE SAP_FLAG_TYPE
 #define SAP_FLAG_ADDRESS (BIT(4))

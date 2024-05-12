@@ -1,6 +1,8 @@
 /* SPDX-FileCopyrightText: 2024 Linus Lüssing <linus.luessing@c0d3.blue> */
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 
+#include <config.h>
+
 #include <errno.h>
 #include <limits.h>
 #include <signal.h>
@@ -54,6 +56,9 @@ static void usage(char *prog)
 	printf("    -d <address|hostname>               Payload's destination (default: from c= in SDP payload)\n");
 	printf("    -p <file|fifo|->                    Payload file (default: -)\n");
 	printf("    -b <bw-limit>                       Total bits/s for all sessions in an SAP group (default: 4000)\n");
+#ifdef HAVE_ZLIB_H
+	printf("    -C                                  Disable compression\n");
+#endif
 	printf("    -h                                  This help page\n");
 	printf("\n");
 	printf("Debug options: (typ. not RFC compliant)\n");
@@ -68,7 +73,7 @@ static void usage(char *prog)
 //	printf("    -m <bytes>                          Packet MTU (default: min(1000, iface-MTU))\n");
 }
 
-char *getopt_args_fmt = "46d:p:t:T:I:i:Jc:b:m:h";
+char *getopt_args_fmt = "46d:p:t:T:I:i:Jc:b:Cm:h";
 
 static unsigned int get_num_dests(int argc, char *argv[])
 {
@@ -95,6 +100,7 @@ static void get_args(int argc,
 		     unsigned int num_dests,
 		     char **payload_filename,
 		     char **payload_type,
+		     int *enable_compression,
 		     int *msg_type,
 		     uint16_t **p_msg_id_hash,
 		     unsigned int *interval,
@@ -204,6 +210,11 @@ static void get_args(int argc,
 				exit(1);
 			}
 			break;
+		case 'C':
+#ifdef HAVE_ZLIB_H
+			*enable_compression = -1;
+#endif
+			break;
 		case 'm':
 			break;
 		case 'h':
@@ -238,14 +249,16 @@ int main(int argc, char *argv[])
 	int no_jitter = 0;
 	unsigned long count = 0;
 	long bw_limit = 0;
+	int enable_compression = 0;
 
 	get_args(argc, argv, &addr_family, &dests, num_dests, &payload_filename,
-		 &payload_type, &msg_type, &p_msg_id_hash, &interval,
-		 &no_jitter, &count, &bw_limit);
+		 &payload_type, &enable_compression, &msg_type, &p_msg_id_hash,
+		 &interval, &no_jitter, &count, &bw_limit);
 
 	ctx = sap_init_custom(dests, addr_family, payload_filename,
-			      payload_type, msg_type, p_msg_id_hash, interval,
-			      no_jitter, count, bw_limit);
+			      payload_type, enable_compression, msg_type,
+			      p_msg_id_hash, interval, no_jitter, count,
+			      bw_limit);
 	if (!ctx) {
 		usage(argv[0]);
 		exit(1);
