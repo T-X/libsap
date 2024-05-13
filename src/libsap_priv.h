@@ -92,8 +92,10 @@ struct sap_ctx_dest {
 	struct hlist_node node;
 	size_t total_msg_lens;
 	size_t num_sessions;
+	size_t num_ha_sessions;
 	/* TODO: maybe convert to hash map? */
 	struct hlist_head sessions_list;
+	struct hlist_head ha_sessions_list;
 };
 
 static inline unsigned int sap_ipeth_hdrlen(union sap_sockaddr_union *addr)

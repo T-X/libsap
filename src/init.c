@@ -826,6 +826,7 @@ static void sap_create_message(struct sap_ctx_dest *ctx_dest,
 	ctx_dest->msg_len = len;
 	ctx_dest->total_msg_lens += len + sap_ipeth_hdrlen(&ctx_dest->dest);
 	ctx_dest->num_sessions++;
+	ctx_dest->num_ha_sessions++;
 }
 
 static int sap_init_ctx_dest_add_epoll(struct sap_ctx_dest *ctx_dest)
@@ -875,11 +876,13 @@ sap_init_ctx_dest(struct sap_ctx *ctx, char *dest, int pay_to_sap_dest,
 
 	memset(ctx_dest, 0, sizeof(*ctx_dest));
 	INIT_HLIST_HEAD(&ctx_dest->sessions_list);
+	INIT_HLIST_HEAD(&ctx_dest->ha_sessions_list);
 	ctx_dest->ctx = ctx;
 	ctx_dest->epoll_ctx_rx = SAP_EPOLL_CTX_TYPE_RX;
 	ctx_dest->epoll_ctx_tx = SAP_EPOLL_CTX_TYPE_TX;
 	ctx_dest->total_msg_lens = 0;
 	ctx_dest->num_sessions = 0;
+	ctx_dest->num_ha_sessions = 0;
 
 	ctx_dest->timer_fd = timerfd_create(CLOCK_MONOTONIC, O_NONBLOCK);
 	if (ctx_dest->timer_fd < 0)
