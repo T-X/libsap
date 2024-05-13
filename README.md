@@ -279,15 +279,12 @@ out:
 
 * If "-p" is a pipe, keep it  open and update session if new SDP is received
   (use "\r\n\r\n" and/or "\0" as delimeters?)
-* compression / zlib support
 * authentication
 * encryption
 * shrink SAP terminate message size
 * replace / add alternatives for Linux-isms? make multi-platform compatible
 * add an MTU / packet size limit option, defaulting to 1000 bytes per RFC
   (we can't use/enforce IP fragmentation for UDP/multicast packets or can we?)
-* add a "-D" option for an explicit SAP group multicast address
-  (VLC has such an option)
 * add a "-O" option to set an explicit/alternative SAP orig-source address
 * some more verbose output for sap tool?
 * add getopt\_long() / long option names to sap tool
@@ -299,6 +296,10 @@ out:
   and which can be called again / continued?
 * add a `sap_run_wait(ctx, timeout_msec)` variant which returns after
   timeout\_msec milliseconds, and which can be called again / continued?
+* add an option to make message ID hash generation deterministic / a real
+  hash instead of a random one ID (even though random is fine by RFC, too)?
+  -> easier for high-availability/redundant SAP announcers for the same,
+  identical (SDP) payload
 * implement SAP client side:
  * sap tool:
    * add a "-l"/listener option, which avoids SAP transmissions, but joins

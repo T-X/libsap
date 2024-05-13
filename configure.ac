@@ -29,25 +29,6 @@ AS_IF([test "x$with_zlib" != xno],
     ])
   ])
 
-#AC_ARG_WITH([zlib],
-#  [AS_HELP_STRING([--with-zlib],
-#    [use zlib for SAP compression @<:@default=check@:>@])],
-#  [],
-#  [: m4_divert_text([DEFAULTS], [have_zlib=check])])
-#
-#have_zlib="no"
-#AS_IF([test "$with_zlib" = check], [
-#  AC_CHECK_HEADERS([zlib.h], [
-#    AC_CHECK_LIB([z], [deflate], [
-#      have_zlib=yes
-#      AC_DEFINE([HAVE_ZLIB], 1, [Define to 1 if you have zlib.])
-#      LIBZ="-lz"
-#    ])
-#  ])
-#])
-#AC_SUBST([LIBZ])
-#AM_CONDITIONAL([HAVE_ZLIB], [ test "${have_zlib}" = "yes" ])
-
 AM_INIT_AUTOMAKE([1.11 subdir-objects -Wall -Werror])
 AM_PROG_AR
 LT_INIT

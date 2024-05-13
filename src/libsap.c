@@ -78,7 +78,10 @@ static unsigned int sap_get_interval(struct sap_ctx_dest *ctx_dest)
 
 static struct itimerspec sap_get_timeout_next(struct sap_ctx_dest *ctx_dest)
 {
-	unsigned int interval = sap_get_interval(ctx_dest);
+	unsigned int interval;
+
+	interval = sap_get_interval(ctx_dest) / ctx_dest->num_ha_sessions;
+
 	struct itimerspec timer = {
 		.it_interval = { 0 },
 		.it_value = {
@@ -234,12 +237,13 @@ static int sap_session_cmp(struct sap_session_entry *session,
 
 static struct sap_session_entry *
 sap_session_get(struct sap_ctx_dest *ctx_dest,
-		union sap_sockaddr_union *orig_src, uint16_t msg_id_hash)
+		union sap_sockaddr_union *orig_src, uint16_t msg_id_hash,
+		struct hlist_head *sessions_list)
 {
 	struct sap_session_entry *session = NULL, *prev = NULL;
 	int ret;
 
-	hlist_for_each_entry(session, &ctx_dest->sessions_list, node) {
+	hlist_for_each_entry(session, sessions_list, node) {
 		ret = sap_session_cmp(session, orig_src, msg_id_hash);
 		/* found */
 		if (!ret)
@@ -283,11 +287,12 @@ sap_session_create(struct sap_ctx_dest *ctx_dest,
 static struct sap_session_entry *
 sap_session_get_or_add(struct sap_ctx_dest *ctx_dest,
 		       union sap_sockaddr_union *orig_src, uint16_t msg_id_hash,
-		       ssize_t msg_len)
+		       ssize_t msg_len, struct hlist_head *sessions_list)
 {
 	struct sap_session_entry *session, *new_session;
 
-	session = sap_session_get(ctx_dest, orig_src, msg_id_hash);
+	session = sap_session_get(ctx_dest, orig_src, msg_id_hash,
+				  sessions_list);
 
 	/* found */
 	if (session && !sap_session_cmp(session, orig_src, msg_id_hash))
@@ -305,11 +310,15 @@ sap_session_get_or_add(struct sap_ctx_dest *ctx_dest,
 		return NULL;
 	}
 
-	ctx_dest->total_msg_lens += new_session->msg_len;
-	ctx_dest->num_sessions++;
+	if (&ctx_dest->ha_sessions_list == sessions_list) {
+		ctx_dest->num_ha_sessions++;
+	} else {
+		ctx_dest->total_msg_lens += new_session->msg_len;
+		ctx_dest->num_sessions++;
+	}
 
 	if (!session)
-		hlist_add_head(&new_session->node, &ctx_dest->sessions_list);
+		hlist_add_head(&new_session->node, sessions_list);
 	else
 		hlist_add_behind(&new_session->node, &session->node);
 
@@ -317,18 +326,28 @@ sap_session_get_or_add(struct sap_ctx_dest *ctx_dest,
 }
 
 static int sap_session_del(struct sap_ctx_dest *ctx_dest,
-			   struct sap_session_entry *session)
+			   struct sap_session_entry *session,
+			   struct hlist_head *sessions_list)
 {
 	int ret = -EPROTO;
 
+	if (&ctx_dest->ha_sessions_list == sessions_list) {
 	/* assertions, should not happen */
-	if (ctx_dest->num_sessions <= 1 ||
-	    ctx_dest->total_msg_lens <= session->msg_len)
-		goto err;
+		if (ctx_dest->num_ha_sessions <= 1)
+			goto err;
+
+		ctx_dest->num_ha_sessions--;
+	} else {
+		/* assertions, should not happen */
+		if (ctx_dest->num_sessions <= 1 ||
+		    ctx_dest->total_msg_lens <= session->msg_len)
+			goto err;
+
+		ctx_dest->num_sessions--;
+		ctx_dest->total_msg_lens -= session->msg_len;
+	}
 
 	ret = 0;
-	ctx_dest->num_sessions--;
-	ctx_dest->total_msg_lens -= session->msg_len;
 err:
 	hlist_del(&session->node);
 	free(session);
@@ -338,25 +357,33 @@ err:
 
 static int sap_session_terminate(struct sap_ctx_dest *ctx_dest,
 				 union sap_sockaddr_union *orig_src,
-				 uint16_t msg_id_hash)
+				 uint16_t msg_id_hash,
+				 struct hlist_head *sessions_list)
 {
-	struct sap_session_entry *session = sap_session_get(ctx_dest, orig_src, msg_id_hash);
+	struct sap_session_entry *session;
+
+	/* what if it's a high-availability neighbor? should we react directly
+	 * with an SAP (re)announcement for the same message ID hash / payload?
+	 */
+	session = sap_session_get(ctx_dest, orig_src, msg_id_hash,
+				  sessions_list);
 
 	/* ignore unknown SAP terminations, maybe we just started */
 	if (!session)
 		return 0;
 
-	return sap_session_del(ctx_dest, session);
+	return sap_session_del(ctx_dest, session, sessions_list);
 }
 
 static int sap_session_update(struct sap_ctx_dest *ctx_dest,
 			      union sap_sockaddr_union *orig_src,
-			      uint16_t msg_id_hash, ssize_t msg_len)
+			      uint16_t msg_id_hash, ssize_t msg_len,
+			      struct hlist_head *sessions_list)
 {
 	struct sap_session_entry *session;
 
 	session = sap_session_get_or_add(ctx_dest, orig_src, msg_id_hash,
-					 msg_len);
+					 msg_len, sessions_list);
 	if (!session)
 		return -ENOMEM;
 
@@ -368,6 +395,7 @@ static int sap_session_update(struct sap_ctx_dest *ctx_dest,
 static int sap_epoll_rx_handler(struct sap_ctx_dest *ctx_dest)
 {
 	char buffer[sizeof(struct sap_packet) + sizeof(struct in6_addr)];
+	struct hlist_head *sessions_list = &ctx_dest->sessions_list;
 	struct sap_packet *packet, *my_packet;
 	union sap_sockaddr_union src = { 0 };
 	union sap_sockaddr_union orig_src = { 0 };
@@ -407,14 +435,12 @@ static int sap_epoll_rx_handler(struct sap_ctx_dest *ctx_dest)
 	    packet->msg_id_hash == my_packet->msg_id_hash)
 		goto out;
 
+	/* assume this is a high-availability SAP announcer on another host,
+	 * for the same payload as ours
+	 */
 	if (sap_is_my_source(ctx_dest, &orig_src) &&
 	    packet->msg_id_hash == my_packet->msg_id_hash)
-		/* TODO: should be a high-availability, redundant sender,
-		 * we should scale back our transmissions accordingly
-		 * (adjust our interval - or just reset our next transmission
-		 * timer?)
-		 */
-		goto out;
+		sessions_list = &ctx_dest->ha_sessions_list;
 
 	msg_len = recv(ctx_dest->sd_rx, buffer, 0, MSG_PEEK | MSG_TRUNC);
 	if (msg_len < sizeof(*packet))
@@ -422,10 +448,12 @@ static int sap_epoll_rx_handler(struct sap_ctx_dest *ctx_dest)
 
 	if (packet->flags & SAP_FLAG_TERMINATE)
 		ret = sap_session_terminate(ctx_dest, &orig_src,
-					    ntohs(packet->msg_id_hash));
+					    ntohs(packet->msg_id_hash),
+					    sessions_list);
 	else
 		ret = sap_session_update(ctx_dest, &orig_src,
-					 ntohs(packet->msg_id_hash), msg_len);
+					 ntohs(packet->msg_id_hash), msg_len,
+					 sessions_list);
 
 	if (ret < 0)
 		goto out;
@@ -481,22 +509,30 @@ static int sap_session_outcounted(struct sap_ctx *ctx,
 	return 0;
 }
 
-static void sap_sessions_timeout(struct sap_ctx_dest *ctx_dest)
+static void sap_sessions_timeout_list(struct sap_ctx_dest *ctx_dest,
+				      struct timespec *now,
+				      struct hlist_head *sessions_list)
 {
 	struct sap_session_entry *session;
 	struct hlist_node *tmp;
+
+	hlist_for_each_entry_safe(session, tmp, sessions_list, node) {
+		if (sap_session_timeouted(session, now) ||
+		    sap_session_outcounted(ctx_dest->ctx, session))
+			sap_session_del(ctx_dest, session, sessions_list);
+
+		session->missed++;
+	}
+}
+
+static void sap_sessions_timeout(struct sap_ctx_dest *ctx_dest)
+{
 	struct timespec now;
 
 	clock_gettime(CLOCK_MONOTONIC, &now);
 
-	hlist_for_each_entry_safe(session, tmp, &ctx_dest->sessions_list,
-				  node) {
-		if (sap_session_timeouted(session, &now) ||
-		    sap_session_outcounted(ctx_dest->ctx, session))
-			sap_session_del(ctx_dest, session);
-
-		session->missed++;
-	}
+	sap_sessions_timeout_list(ctx_dest, &now, &ctx_dest->sessions_list);
+	sap_sessions_timeout_list(ctx_dest, &now, &ctx_dest->ha_sessions_list);
 }
 
 static int sap_count_reached(struct sap_ctx *ctx)
@@ -610,6 +646,10 @@ int sap_run(struct sap_ctx *ctx)
 		atomic_thread_fence(memory_order_acquire);
 	}
 
+	/* should we really send an SAP termination if we have a
+	 * high-availability group with redundant SAP announcers for the same
+	 * message ID hash?
+	 */
 	if (ctx->msg_type < 0)
 		sap_terminate_all(ctx);
 
