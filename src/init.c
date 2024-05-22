@@ -12,7 +12,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/timerfd.h>
-#ifdef HAVE_ZLIB_H
+#ifdef HAVE_ZLIB
 	#include <zlib.h>
 #endif
 
@@ -562,7 +562,7 @@ static int sap_join_dest(struct sap_ctx_dest *ctx_dest)
 	return -EINVAL;
 }
 
-static int sap_create_socket_tx(struct sap_ctx_dest *ctx_dest)
+static int sap_create_socket_tx(struct sap_ctx_dest *ctx_dest, char *orig_src)
 {
 	union sap_sockaddr_union *sap_dst = &ctx_dest->dest;
 	socklen_t addr_len = sizeof(ctx_dest->src);
@@ -583,6 +583,24 @@ static int sap_create_socket_tx(struct sap_ctx_dest *ctx_dest)
 	if (ret < 0)
 		goto err;
 
+	if (!orig_src) {
+		ctx_dest->orig_src = ctx_dest->src;
+		goto skip_orig_src;
+	}
+
+	ctx_dest->orig_src.s.sa_family = AF_INET6;
+	ret = inet_pton(AF_INET6, orig_src, &ctx_dest->orig_src.in6.sin6_addr);
+	if (ret == 1)
+		goto skip_orig_src;
+
+	ctx_dest->orig_src.s.sa_family = AF_INET;
+	ret = inet_pton(AF_INET, orig_src, &ctx_dest->orig_src.in.sin_addr);
+	if (ret != 1) {
+		ret = -EINVAL;
+		goto err;
+	}
+
+skip_orig_src:
 	ret = sap_set_hop_limit(sd, sap_dst);
 	if (ret < 0)
 		goto err;
@@ -624,7 +642,7 @@ err:
 }
 
 static int sap_create_socket(struct sap_ctx_dest *ctx_dest, char *pay_dst,
-			     int pay_to_sap_dest, int af_hint)
+			     int pay_to_sap_dest, int af_hint, char *orig_src)
 {
 	union sap_sockaddr_union sap_dst = { 0 };
 	union sap_sockaddr_union ai_addr;
@@ -661,7 +679,7 @@ static int sap_create_socket(struct sap_ctx_dest *ctx_dest, char *pay_dst,
 
 		ctx_dest->dest = sap_dst;
 
-		ret = sap_create_socket_tx(ctx_dest);
+		ret = sap_create_socket_tx(ctx_dest, orig_src);
 		if (ret < 0)
 			continue;
 
@@ -705,16 +723,16 @@ static uint8_t sap_get_flags(int sap_af, int compressed, int msg_type)
 
 static char *sap_push_orig_source(struct sap_ctx_dest *ctx_dest, char *msg)
 {
-	union sap_sockaddr_union *src = &ctx_dest->src;
+	union sap_sockaddr_union *orig_src = &ctx_dest->orig_src;
 
-	switch (src->s.sa_family) {
+	switch (orig_src->s.sa_family) {
 	case AF_INET:
 		struct in_addr *addr4 = (struct in_addr *)msg;
-		*addr4 = src->in.sin_addr;
+		*addr4 = orig_src->in.sin_addr;
 		return msg + sizeof(*addr4);
 	case AF_INET6:
 		struct in6_addr *addr6 = (struct in6_addr *)msg;
-		*addr6 = src->in6.sin6_addr;
+		*addr6 = orig_src->in6.sin6_addr;
 		return msg + sizeof(*addr6);
 	}
 
@@ -759,7 +777,7 @@ static void sap_create_message(struct sap_ctx_dest *ctx_dest,
 			       const char *payload_type, int compressed,
 			       int msg_type, uint16_t msg_id_hash)
 {
-	int sap_af = ctx_dest->dest.s.sa_family;
+	int sap_af = ctx_dest->orig_src.s.sa_family;
 	size_t len, orig_source_len = 0;
 	char *msg;
 
@@ -847,7 +865,7 @@ static struct sap_ctx_dest *
 sap_init_ctx_dest(struct sap_ctx *ctx, char *dest, int pay_to_sap_dest,
 		  int dest_af, char *payload_type, char *payload,
 		  size_t payload_len, int compressed, int msg_type,
-		  uint16_t msg_id_hash)
+		  uint16_t msg_id_hash, char *orig_src)
 {
 	struct sap_ctx_dest *ctx_dest;
 	int ret;
@@ -870,7 +888,8 @@ sap_init_ctx_dest(struct sap_ctx *ctx, char *dest, int pay_to_sap_dest,
 	if (ctx_dest->timer_fd < 0)
 		goto err1;
 
-	ret = sap_create_socket(ctx_dest, dest, pay_to_sap_dest, dest_af);
+	ret = sap_create_socket(ctx_dest, dest, pay_to_sap_dest, dest_af,
+				orig_src);
 	if (ret < 0)
 		goto err2;
 
@@ -919,7 +938,7 @@ static int sap_init_ctx_dests(struct sap_ctx *ctx, char *dests[],
 			      int pay_to_sap_dest, int dest_af,
 			      char *payload_type, char *payload,
 			      size_t payload_len, int compressed, int msg_type,
-			      uint16_t msg_id)
+			      uint16_t msg_id, char *orig_src)
 {
 	struct sap_ctx_dest *ctx_dest;
 	char *dest;
@@ -932,7 +951,7 @@ static int sap_init_ctx_dests(struct sap_ctx *ctx, char *dests[],
 		ctx_dest = sap_init_ctx_dest(ctx, dest, pay_to_sap_dest,
 					     dest_af, payload_type, payload,
 					     payload_len, compressed, msg_type,
-					     msg_id);
+					     msg_id, orig_src);
 		if (!ctx_dest)
 			return -EINVAL;
 
@@ -954,6 +973,7 @@ struct sap_ctx *sap_init_custom(
 	int enable_compression,
 	int msg_type,
 	uint16_t *msg_id_hash,
+	char *orig_src,
 	unsigned int interval,
 	int no_jitter,
 	unsigned long count,
@@ -1043,7 +1063,7 @@ struct sap_ctx *sap_init_custom(
 
 	ret = sap_init_ctx_dests(ctx, sdp_dests, 1, dest_af, payload_type,
 				 payload, payload_len, enable_compression,
-				 msg_type, msg_id);
+				 msg_type, msg_id, orig_src);
 	if (ret < 0) {
 		errno = ret;
 		goto err6;
@@ -1051,7 +1071,7 @@ struct sap_ctx *sap_init_custom(
 
 	ret = sap_init_ctx_dests(ctx, payload_dests, 1, dest_af, payload_type,
 				 payload, payload_len, enable_compression,
-				 msg_type, msg_id);
+				 msg_type, msg_id, orig_src);
 	if (ret < 0) {
 		errno = ret;
 		goto err6;
@@ -1059,7 +1079,7 @@ struct sap_ctx *sap_init_custom(
 
 	ret = sap_init_ctx_dests(ctx, sap_dests, 0, dest_af, payload_type,
 				 payload, payload_len, enable_compression,
-				 msg_type, msg_id);
+				 msg_type, msg_id, orig_src);
 	if (ret < 0) {
 		errno = ret;
 		goto err6;
@@ -1097,14 +1117,14 @@ err1:
 struct sap_ctx *sap_init_fast(char *payload_filename)
 {
 	return sap_init_custom(NULL, NULL, 0, AF_UNSPEC, payload_filename, NULL,
-			       0, -1, NULL, 5, 0, 0, 0);
+			       0, -1, NULL, NULL, 5, 0, 0, 0);
 }
 
 /* use this for fully RFC2974 compliant execution, e.g. for daemons */
 struct sap_ctx *sap_init(char *payload_filename)
 {
 	return sap_init_custom(NULL, NULL, 0, AF_UNSPEC, payload_filename, NULL,
-			       0, -1, NULL, 0, 0, 0, 0);
+			       0, -1, NULL, NULL, 0, 0, 0, 0);
 }
 
 void sap_free(struct sap_ctx *ctx)

@@ -37,12 +37,6 @@ enum sap_msg_type {
 	SAP_TERMINATE = 1,
 };
 
-union sap_sockaddr_union {
-	struct sockaddr_in in;
-	struct sockaddr_in6 in6;
-	struct sockaddr s;
-};
-
 enum sap_epoll_ctx_type {
 	SAP_EPOLL_CTX_TYPE_NONE = 0,
 	SAP_EPOLL_CTX_TYPE_RX,
@@ -86,6 +80,7 @@ struct sap_ctx_dest {
 	int timer_fd;
 	union sap_sockaddr_union dest;
 	union sap_sockaddr_union src;
+	union sap_sockaddr_union orig_src;
 	char *message;
 	size_t msg_len;
 	struct hlist_node node;
@@ -95,6 +90,7 @@ struct sap_ctx_dest {
 	/* TODO: maybe convert to hash map? */
 	struct hlist_head sessions_list;
 	struct hlist_head ha_sessions_list;
+//	struct sap_status_entry event_list;
 };
 
 static inline unsigned int sap_ipeth_hdrlen(union sap_sockaddr_union *addr)

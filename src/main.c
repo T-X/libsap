@@ -3,6 +3,7 @@
 
 #include <config.h>
 
+#include <arpa/inet.h>
 #include <errno.h>
 #include <limits.h>
 #include <signal.h>
@@ -21,6 +22,62 @@ static struct sap_ctx *p_sap_ctx = NULL;
 void signal_handler_shutdown(int signum)
 {
 	sap_term(p_sap_ctx);
+}
+
+/*static int status_dump_cb_header(struct sap_status_entry *entry)
+{
+	if (entry->type == SAP_STATUS_OWN)
+		printf("Own session:\n");
+	else if (entry->type == SAP_STATUS_NORMAL)
+		printf("Session entries:\n");
+	else if (entry->type == SAP_STATUS_HA)
+		printf("High availability session entries:\n");
+
+	return 0;
+}
+
+static const char *inet_ntop_46(const union sap_sockaddr_union *src, char *dst,
+				socklen_t dst_size)
+{
+	switch (src->s.sa_family) {
+	case AF_INET:
+		return inet_ntop(AF_INET, &src->in.sin_addr, dst, dst_size);
+	case AF_INET6:
+		return inet_ntop(AF_INET6, &src->in6.sin6_addr, dst, dst_size);
+	}
+
+	return NULL;
+}*/
+
+/*static int status_dump_cb(struct sap_status_entry *entry, void *data, int first)
+{
+	char dest[INET6_ADDRSTRLEN];
+	char src[INET6_ADDRSTRLEN];
+
+	if (!entry) {
+		printf("\n");
+		return 0;
+	}
+
+	if (entry->first)
+		status_dump_cb_header(entry);
+
+//	inet_ntop_46(&entry->dest);
+	inet_ntop_46(&entry->dest, dest, sizeof(dest));
+	inet_ntop_46(&entry->src, src, sizeof(src));
+//	inet_ntop_46(AF_INET6, &entry->src.in6.sin6_addr, src, sizeof(src));
+
+	printf("\tdest: %s, %ssrc: %s, msg_id_hash: 0x%04x\n",
+	       dest, entry->type == SAP_STATUS_HA ? "" : "orig-", src,
+	       entry->msg_id_hash);
+
+	return 0;
+}*/
+
+void signal_handler_status(int signum)
+{
+//	sap_status_dump(p_sap_ctx, status_dump_cb, NULL);
+	sap_status_dump_json(p_sap_ctx, STDOUT_FILENO);
 }
 
 void setup_signal_handler(struct sap_ctx *ctx)
@@ -44,6 +101,11 @@ void setup_signal_handler(struct sap_ctx *ctx)
 	sigaction(SIGTERM, NULL, &old_action);
 	if (old_action.sa_handler != SIG_IGN)
 		sigaction(SIGTERM, &new_action, NULL);
+
+	new_action.sa_handler = &signal_handler_status;
+	sigaction(SIGUSR1, NULL, &old_action);
+	if (old_action.sa_handler != SIG_IGN)
+		sigaction(SIGUSR1, &new_action, NULL);
 }
 
 static void usage(char *prog)
@@ -56,7 +118,7 @@ static void usage(char *prog)
 	printf("    -d <address|hostname>               Payload's destination (default: from c= in SDP payload)\n");
 	printf("    -p <file|fifo|->                    Payload file (default: -)\n");
 	printf("    -b <bw-limit>                       Total bits/s for all sessions in an SAP group (default: 4000)\n");
-#ifdef HAVE_ZLIB_H
+#ifdef HAVE_ZLIB
 	printf("    -C                                  Disable compression\n");
 #endif
 	printf("    -h                                  This help page\n");
@@ -67,6 +129,7 @@ static void usage(char *prog)
 	printf("    -t <type>                           Payload type (default: \"application/sdp\")\n");
 	printf("    -T <announce|terminate>             Message type, sets debug mode (default: standard/daemon mode)\n");
 	printf("    -I <msg-id-hash>                    Message ID hash (default: random)\n");
+	printf("    -O <ipv4-address|ipv6-address>      Orig source (default: from IP source address)\n");
 	printf("    -i <interval>                       Interval override in seconds (default: 300)\n");
 	printf("    -J                                  Disable interval jitter\n");
 	printf("    -c <count>                          Number of messages to send\n");
@@ -75,7 +138,7 @@ static void usage(char *prog)
 //	printf("    -m <bytes>                          Packet MTU (default: min(1000, iface-MTU))\n");
 }
 
-char *getopt_args_fmt = "46d:S:Dp:t:T:I:i:Jc:b:Cm:h";
+char *getopt_args_fmt = "46d:S:Dp:t:T:I:O:i:Jc:b:Cm:h";
 
 static unsigned int get_num_dests(int argc, char *argv[], char type)
 {
@@ -104,7 +167,8 @@ static void get_args(int argc,
 		     char **payload_type,
 		     int *enable_compression,
 		     int *msg_type,
-		     uint16_t **p_msg_id_hash,
+		     uint16_t **msg_id_hash,
+		     char **orig_src,
 		     unsigned int *interval,
 		     int *no_jitter,
 		     unsigned long *count,
@@ -112,6 +176,7 @@ static void get_args(int argc,
 {
 	int msg_id_hash_found = 0;
 	int payload_dests_idx = 0;
+	int orig_src_found = 0;
 	int sap_dests_idx = 0;
 	int opt, ret;
 
@@ -189,7 +254,7 @@ static void get_args(int argc,
 			}
 			break;
 		case 'I':
-			ret = strtoi_generic(optarg, *p_msg_id_hash);
+			ret = strtoi_generic(optarg, *msg_id_hash);
 			if (ret < 0) {
 				fprintf(stderr,
 					"Error: invalid message hash id '%s'\n\n",
@@ -198,6 +263,10 @@ static void get_args(int argc,
 				exit(1);
 			}
 			msg_id_hash_found = 1;
+			break;
+		case 'O':
+			*orig_src = optarg;
+			orig_src_found = 1;
 			break;
 		case 'J':
 			*no_jitter = 1;
@@ -232,7 +301,7 @@ static void get_args(int argc,
 			}
 			break;
 		case 'C':
-#ifdef HAVE_ZLIB_H
+#ifdef HAVE_ZLIB
 			*enable_compression = -1;
 #endif
 			break;
@@ -252,7 +321,9 @@ static void get_args(int argc,
 	}
 
 	if (!msg_id_hash_found)
-		*p_msg_id_hash = NULL;
+		*msg_id_hash = NULL;
+	if (!orig_src_found)
+		*orig_src = NULL;
 }
 
 int main(int argc, char *argv[])
@@ -267,24 +338,26 @@ int main(int argc, char *argv[])
 	char *payload_filename = NULL;
 	struct sap_ctx *ctx;
 	int msg_type = -1;
-	uint16_t msg_id_hash;
-	uint16_t *p_msg_id_hash = &msg_id_hash;
+	char *orig_src = NULL;
+	uint16_t msg_id_hash_store;
+	uint16_t *msg_id_hash = &msg_id_hash_store;
 	unsigned int interval = 0;
 	int no_jitter = 0;
 	unsigned long count = 0;
 	long bw_limit = 0;
 	int enable_compression = 0;
+//	int ret;
 
 	get_args(argc, argv, &addr_family, &payload_dests, num_payload_dests,
 		 &sap_dests, num_sap_dests, &disable_dests_from_sdp,
 		 &payload_filename, &payload_type, &enable_compression,
-		 &msg_type, &p_msg_id_hash, &interval, &no_jitter, &count,
-		 &bw_limit);
+		 &msg_type, &msg_id_hash, &orig_src, &interval, &no_jitter,
+		 &count, &bw_limit);
 
 	ctx = sap_init_custom(payload_dests, sap_dests, disable_dests_from_sdp,
 			      addr_family, payload_filename, payload_type,
-			      enable_compression, msg_type, p_msg_id_hash,
-			      interval, no_jitter, count, bw_limit);
+			      enable_compression, msg_type, msg_id_hash,
+			      orig_src, interval, no_jitter, count, bw_limit);
 	if (!ctx) {
 		usage(argv[0]);
 		exit(1);
@@ -297,7 +370,14 @@ int main(int argc, char *argv[])
 	/* alternative to blocking sap_run(), run threaded: */
 //	sap_start(ctx);
 	/* do stuff here */
-//	sap_stop(ctx);
+	//for (int i = 0; i < 6; i++) {
+/*	while (1) {
+		ret = sap_status_dump(ctx, my_dump_cb, NULL);
+		if (ret < 0)
+			break;
+		sleep(5);
+	}
+	sap_stop(ctx);*/
 
 	sap_free(ctx);
 
