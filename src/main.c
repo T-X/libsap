@@ -131,7 +131,11 @@ static void usage(char *prog)
 	printf("    -S <address|hostname>               SAP destination (default: from payload destinations only)\n");
 	printf("    -t <type>                           Payload type (default: \"application/sdp\")\n");
 	printf("    -T <announce|terminate>             Message type, sets debug mode (default: standard/daemon mode)\n");
+#ifdef HAVE_BLAKE2
+	printf("    -I <msg-id-hash>                    Message ID hash (default: BLAKE2 over full SAP packet)\n");
+#else
 	printf("    -I <msg-id-hash>                    Message ID hash (default: random)\n");
+#endif
 	printf("    -O <ipv4-address|ipv6-address>      Orig source (default: from IP source address)\n");
 	printf("    -i <interval>                       Interval override in seconds (default: 300)\n");
 	printf("    -J                                  Disable interval jitter\n");
