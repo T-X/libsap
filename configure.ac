@@ -31,7 +31,7 @@ AS_IF([test "x$with_zlib" != xno],
 
 AC_ARG_WITH([json-c],
   [AS_HELP_STRING([--with-json-c],
-    [use zlib for SAP compression @<:@default=check@:>@])],
+    [use json-c for JSON formatted status functions @<:@default=check@:>@])],
   [],
   [with_json_c=check])
 
@@ -46,6 +46,28 @@ AS_IF([test "x$with_json_c" != xno],
       [if test "x$with_json-c" != xcheck; then
          AC_MSG_FAILURE(
            [--with-json-c was given, but test for json-c failed])
+       fi
+      ], )
+    ])
+  ])
+
+AC_ARG_WITH([blake2],
+  [AS_HELP_STRING([--with-blake2],
+    [use blake2 for a deterministic SAP Message ID Hash @<:@default=check@:>@])],
+  [],
+  [with_blake2=check])
+
+BLAKE2=
+AS_IF([test "x$with_blake2" != xno],
+  [AC_CHECK_HEADERS([blake2.h],
+    [AC_CHECK_LIB([b2], [blake2b_init],
+      [AC_SUBST([BLAKE2], ["-lb2"])
+       AC_DEFINE([HAVE_BLAKE2], [1],
+                 [Define if you have blake2])
+      ],
+      [if test "x$with_blake2" != xcheck; then
+         AC_MSG_FAILURE(
+           [--with-blake2 was given, but test for blake2 failed])
        fi
       ], )
     ])

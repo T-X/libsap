@@ -121,6 +121,9 @@ static void usage(char *prog)
 #ifdef HAVE_ZLIB
 	printf("    -C                                  Disable compression\n");
 #endif
+#ifdef HAVE_BLAKE2
+	printf("    -r                                  Use a random message ID hash (default: BLAKE2 over SAP packet)\n");
+#endif
 	printf("    -h                                  This help page\n");
 	printf("\n");
 	printf("Debug options: (typ. not RFC compliant)\n");
@@ -138,7 +141,7 @@ static void usage(char *prog)
 //	printf("    -m <bytes>                          Packet MTU (default: min(1000, iface-MTU))\n");
 }
 
-char *getopt_args_fmt = "46d:S:Dp:t:T:I:O:i:Jc:b:Cm:h";
+char *getopt_args_fmt = "46d:S:Dp:t:T:I:O:i:Jc:b:Crm:h";
 
 static unsigned int get_num_dests(int argc, char *argv[], char type)
 {
@@ -166,6 +169,7 @@ static void get_args(int argc,
 		     char **payload_filename,
 		     char **payload_type,
 		     int *enable_compression,
+		     int *enable_rand_msg_id_hash,
 		     int *msg_type,
 		     uint16_t **msg_id_hash,
 		     char **orig_src,
@@ -305,6 +309,9 @@ static void get_args(int argc,
 			*enable_compression = -1;
 #endif
 			break;
+		case 'r':
+			*enable_rand_msg_id_hash = 1;
+			break;
 		case 'm':
 			break;
 		case 'h':
@@ -346,18 +353,20 @@ int main(int argc, char *argv[])
 	unsigned long count = 0;
 	long bw_limit = 0;
 	int enable_compression = 0;
+	int enable_rand_msg_id_hash = 0;
 //	int ret;
 
 	get_args(argc, argv, &addr_family, &payload_dests, num_payload_dests,
 		 &sap_dests, num_sap_dests, &disable_dests_from_sdp,
 		 &payload_filename, &payload_type, &enable_compression,
-		 &msg_type, &msg_id_hash, &orig_src, &interval, &no_jitter,
-		 &count, &bw_limit);
+		 &enable_rand_msg_id_hash, &msg_type, &msg_id_hash, &orig_src,
+		 &interval, &no_jitter, &count, &bw_limit);
 
 	ctx = sap_init_custom(payload_dests, sap_dests, disable_dests_from_sdp,
 			      addr_family, payload_filename, payload_type,
-			      enable_compression, msg_type, msg_id_hash,
-			      orig_src, interval, no_jitter, count, bw_limit);
+			      enable_compression, enable_rand_msg_id_hash,
+			      msg_type, msg_id_hash, orig_src, interval,
+			      no_jitter, count, bw_limit);
 	if (!ctx) {
 		usage(argv[0]);
 		exit(1);

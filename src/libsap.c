@@ -752,18 +752,16 @@ void sap_stop(struct sap_ctx *ctx)
 	mtx_unlock(&ctx->thread.ctrl_lock);
 }
 
-//				    void *data, int first, int last, int dest_first, int dest_last),
-int sap_status_dump_own(struct sap_ctx_dest *ctx_dest,
+static void sap_status_dump_own(struct sap_ctx_dest *ctx_dest,
 		    int (*callback)(struct sap_status_entry *entry, void *data),
 		    void *cb_data)
 {
 	struct sap_status_entry entry;
 	uint16_t hash;
 
-//	entry.first = 1;
-//	entry.last = 1;
 	entry.dest = ctx_dest->dest;
-	entry.src = ctx_dest->orig_src;
+	entry.src = ctx_dest->src;
+	entry.orig_src = ctx_dest->orig_src;
 	hash = ((struct sap_packet *)ctx_dest->message)->msg_id_hash;
 	entry.msg_id_hash = ntohs(hash);
 	entry.status = SAP_STATUS_ADD;
@@ -772,8 +770,7 @@ int sap_status_dump_own(struct sap_ctx_dest *ctx_dest,
 	callback(&entry, cb_data);
 }
 
-//				    void *data, int first, int last, int dest_first, int dest_last),
-static int sap_status_dump_other(struct sap_ctx_dest *ctx_dest,
+static void sap_status_dump_other(struct sap_ctx_dest *ctx_dest,
 		    int (*callback)(struct sap_status_entry *entry,
 				    void *data),
 		    void *cb_data)
@@ -782,29 +779,18 @@ static int sap_status_dump_other(struct sap_ctx_dest *ctx_dest,
 	struct sap_status_entry entry;
 
 	hlist_for_each_entry(session, &ctx_dest->sessions_list, node) {
-/*		if (!session->node.next) {
-			entry.last = 1;
-			dest_last = 1;
-		} else {
-			entry.last = 0;
-			dest_last = 0;
-		}*/
-
 		entry.dest = ctx_dest->dest;
-		entry.src = session->orig_src;
+		memset(&entry.src, 0, sizeof(entry.src));
+		entry.orig_src = session->orig_src;
 		entry.msg_id_hash = session->msg_id_hash;
 		entry.status = SAP_STATUS_ADD;
 		entry.type = SAP_STATUS_NORMAL;
 
-//		callback(&entry, cb_data, first, last, dest_first, dest_last);
 		callback(&entry, cb_data);
-//		entry.first = session->node.next ? -1 : 0;
-//		dest_first = 0;
 	}
 }
 
-//				    void *data, int first, int last, int dest_first, int dest_last),
-static int sap_status_dump_ha(struct sap_ctx_dest *ctx_dest,
+static void sap_status_dump_ha(struct sap_ctx_dest *ctx_dest,
 		    int (*callback)(struct sap_status_entry *entry,
 				    void *data),
 		    void *cb_data)
@@ -816,28 +802,21 @@ static int sap_status_dump_ha(struct sap_ctx_dest *ctx_dest,
 			     node) {
 		entry.dest = ctx_dest->dest;
 		entry.src = session->orig_src;
+		memset(&entry.orig_src, 0, sizeof(entry.orig_src));
 		entry.msg_id_hash = session->msg_id_hash;
 		entry.status = SAP_STATUS_ADD;
 		entry.type = SAP_STATUS_HA;
 
-//		callback(&entry, cb_data, first, dst_first);
 		callback(&entry, cb_data);
-//		entry.first = session->node.next ? -1 : 0;
 	}
 }
 
-//				    void *data, int first, int last, int dest_first, int dest_last),
 int sap_status_dump(struct sap_ctx *ctx,
 		    int (*callback)(struct sap_status_entry *entry,
 				    void *data),
 		    void *cb_data)
 {
 	struct sap_ctx_dest *ctx_dest;
-//	uint16_t hash;
-//	int first = 1;
-//	int last = 0;
-//	int dest_first;
-//	int dest_last;
 
 	if (ctx->term)
 		return -ESHUTDOWN;
@@ -852,18 +831,6 @@ int sap_status_dump(struct sap_ctx *ctx,
 	return 0;
 }
 
-/*static int sap_status_dump_cb_header(struct sap_status_entry *entry)
-{
-	if (entry->type == SAP_STATUS_OWN)
-		printf("Own session:\n");
-	else if (entry->type == SAP_STATUS_NORMAL)
-		printf("Session entries:\n");
-	else if (entry->type == SAP_STATUS_HA)
-		printf("High availability session entries:\n");
-
-	return 0;
-}*/
-
 static const char *inet_ntop_46(const union sap_sockaddr_union *src, char *dst,
 				socklen_t dst_size)
 {
@@ -877,181 +844,28 @@ static const char *inet_ntop_46(const union sap_sockaddr_union *src, char *dst,
 	return NULL;
 }
 
-static int sap_status_dump_cb_own(struct sap_status_entry *entry, FILE *file, int dest_first, int dest_last)
-{
-	char src[INET6_ADDRSTRLEN];
-
-	inet_ntop_46(&entry->src, src, sizeof(src));
-
-	fprintf(file, "\n\t\t\t\"own\": {");
-	fprintf(file, "\n\t\t\t\t\"orig-src\": \"%s\",", src);
-	fprintf(file, "\n\t\t\t\t\"msg-id-hash\": \"0x%04x\"", entry->msg_id_hash);
-	fprintf(file, "\n\t\t\t}");
-
-	return 0;
-}
-
-static int sap_status_dump_cb_normal(struct sap_status_entry *entry, FILE *file, int dest_first, int dest_last)
-{
-	char src[INET6_ADDRSTRLEN];
-	char delim[] = ",";
-
-	if (dest_first > 0)
-		delim[0] = '\0';
-
-	fprintf(file, "HERE");
-	inet_ntop_46(&entry->src, src, sizeof(src));
-
-	fprintf(file, "%s\n\t\t\t\"other\": {", delim);
-	fprintf(file, "\n\t\t\t\t\"orig-src\": \"%s\",", src);
-	fprintf(file, "\n\t\t\t\t\"msg-id-hash\": \"0x%04x\"", entry->msg_id_hash);
-	fprintf(file, "\n\t\t\t}");
-
-	return 0;
-}
-
-static int sap_status_dump_cb_ha(struct sap_status_entry *entry, FILE *file, int dst_first)
-{
-	return 0;
-}
-
-/*static int sap_status_dump_cb(struct sap_status_entry *entry, void *data, int first, int last, int dest_first, int dest_last)
-{
-	FILE *file = data;
-	char dest[INET6_ADDRSTRLEN];
-	char delim[] = ",";
-
-
-//fprintf(stderr, "FIRST: %i\n", first);
-	if (first > 0)
-		delim[0] = '\0';
-
-	if (dest_first) {
-		inet_ntop_46(&entry->dest, dest, sizeof(dest));
-		fprintf(file, "%s\n\t\t\"%s\": {", delim, dest);
-	}
-
-	switch (entry->type) {
-	case SAP_STATUS_OWN:
-		sap_status_dump_cb_own(entry, file, dest_first, dest_last);
-		break;
-	case SAP_STATUS_NORMAL:
-		sap_status_dump_cb_normal(entry, file, dest_first, dest_last);
-		break;
-	case SAP_STATUS_HA:
-		sap_status_dump_cb_ha(entry, file, dest_first, dest_last);
-		break;
-	}
-	fprintf(file, "\n\t\t}");*/
-
-//	if (first < 0)
-//		fprintf(file, "\n");
-
-//	return 0;
-	/* was last entry */
-//	if (!entry) {
-//		printf("\n");
-//		return 0;
-//	}
-
-//	if (first)
-//		delim[0] = '\0';
-
-//	if (entry->first)
-//		status_dump_cb_header(entry);
-
-//	inet_ntop_46(&entry->dest);
-//	inet_ntop_46(&entry->dest, dest, sizeof(dest));
-//	inet_ntop_46(&entry->src, src, sizeof(src));
-//	inet_ntop_46(AF_INET6, &entry->src.in6.sin6_addr, src, sizeof(src));
-
-//	printf("\tdest: %s, %ssrc: %s, msg_id_hash: 0x%04x\n",
-//	       dest, entry->type == SAP_STATUS_HA ? "" : "orig-", src,
-//	       entry->msg_id_hash);
-
-//	return 0;
-//}
-
-/*void sap_status_dump_json_dests_open(file)
-{
-	fprintf(file, "{\n");
-	fprintf(file, "\t\"destinations\": {");
-}
-
-void sap_status_dump_json_dests_close(file)
-{
-	fprintf(file, "\n\t}\n");
-	fprintf(file, "}\n");
-}*/
-
-//sap_status_dump_cb_own(entry, struct json_object *dests_obj);
-
-
-/*static int sap_status_dump_cb(struct sap_status_entry *entry, void *data)
-{
-	struct json_object *dests_obj = data;
-
-	switch (entry->type) {
-	case SAP_STATUS_OWN:
-		sap_status_dump_cb_own(entry, file, dest_first, dest_last);
-		break;
-	case SAP_STATUS_NORMAL:
-		sap_status_dump_cb_normal(entry, file, dest_first, dest_last);
-		break;
-	case SAP_STATUS_HA:
-		sap_status_dump_cb_ha(entry, file, dest_first, dest_last);
-		break;
-	}
-}*/
-
-/*int sap_status_dump_json(struct sap_ctx *ctx, int fd)
-{
-	FILE *file;
-	struct json_object *obj, *dests_obj;
-
-	file = fdopen(fd, "a");
-	if (!file)
-		return -EINVAL;
-
-	obj = json_object_new_object();
-	if (!obj)
-		return -ENOMEM;
-
-	json_object_object_add(obj, "destinations", dests_obj);
-//	json_object_to_json_string_ext(
-
-	//fprintf(file, "\t\t{\n");
-	sap_status_dump_json_open(file);
-	sap_status_dump(ctx, sap_status_dump_cb, dests_obj);
-	sap_status_dump_json_close(file);
-	//fprintf(file, "\t\t}\n");
-
-	fflush(file);
-//	if (fd != stdout)
-//		fclose(file);
-	return 0;
-}*/
-
-//static int sap_status_dump_json_obj(struct json_object *obj, 
-
 #ifdef HAVE_JSON_C
 static int sap_status_dump_json_own(struct sap_ctx_dest *ctx_dest, struct json_object *dest_obj)
 {
 	struct sap_packet *packet = (struct sap_packet *)ctx_dest->message;
+	char src[INET6_ADDRSTRLEN];
 	char orig_src[INET6_ADDRSTRLEN];
 	char msg_id[strlen("0x1234") + 1];
-	struct json_object *own_obj, *orig_src_obj, *msg_id_obj;
+	struct json_object *own_obj, *src_obj, *orig_src_obj, *msg_id_obj;
 
+	inet_ntop_46(&ctx_dest->src, src, sizeof(src));
 	inet_ntop_46(&ctx_dest->orig_src, orig_src, sizeof(orig_src));
 	snprintf(msg_id, sizeof(msg_id), "0x%04x", ntohs(packet->msg_id_hash));
 
 	own_obj = json_object_new_object();
+	src_obj = json_object_new_string(src);
 	orig_src_obj = json_object_new_string(orig_src);
 	msg_id_obj = json_object_new_string(msg_id);
 
-	if (!own_obj || !orig_src_obj || !msg_id_obj)
+	if (!own_obj || !src_obj || !orig_src_obj || !msg_id_obj)
 		return -ENOMEM;
 
+	json_object_object_add(own_obj, "src", src_obj);
 	json_object_object_add(own_obj, "orig-src", orig_src_obj);
 	json_object_object_add(own_obj, "msg-id-hash", msg_id_obj);
 	json_object_object_add(dest_obj, "own", own_obj);
@@ -1092,6 +906,8 @@ static int sap_status_dump_json_session(struct sap_ctx_dest *ctx_dest, struct js
 	}
 
 	json_object_object_add(dest_obj, session_key, session_obj);
+
+	return 0;
 }
 
 static int sap_status_dump_json_other(struct sap_ctx_dest *ctx_dest, struct json_object *dest_obj)
@@ -1107,11 +923,13 @@ static int sap_status_dump_json_ha(struct sap_ctx_dest *ctx_dest, struct json_ob
 int sap_status_dump_json(struct sap_ctx *ctx, int fd)
 {
 	struct json_object *obj, *dests_obj, *dest_obj;
-	struct json_object *own_obj, *other_obj, *ha_obj;
 	char dest[INET6_ADDRSTRLEN];
 	struct sap_ctx_dest *ctx_dest;
 	FILE *file;
 	const char *json_str;
+
+	if (ctx->term)
+		return -ESHUTDOWN;
 
 	file = fdopen(fd, "a");
 	if (!file)
@@ -1141,6 +959,7 @@ int sap_status_dump_json(struct sap_ctx *ctx, int fd)
 	json_str = json_object_to_json_string_ext(obj, JSON_C_TO_STRING_PRETTY);
 	fprintf(file, "%s\n", json_str);
 	fflush(file);
+	json_object_put(obj);
 
 	return 0;
 err:

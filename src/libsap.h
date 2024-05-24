@@ -28,6 +28,7 @@ union sap_sockaddr_union {
 struct sap_status_entry {
 	union sap_sockaddr_union dest;
 	union sap_sockaddr_union src;
+	union sap_sockaddr_union orig_src;
 	uint16_t msg_id_hash;
 	enum sap_status_event_type status;
 	enum sap_status_type type;
@@ -42,6 +43,7 @@ struct sap_ctx *sap_init_custom(char *payload_dests[],
 				char *payload_filename,
 				char *payload_type,
 				int enable_compression,
+				int enable_rand_msg_id_hash,
 				int msg_type,
 				uint16_t *msg_id_hash,
 				char *orig_src,
