@@ -104,7 +104,7 @@ static void get_args(int argc,
 		     char **payload_type,
 		     int *enable_compression,
 		     int *msg_type,
-		     uint16_t **p_msg_id_hash,
+		     uint16_t **msg_id_hash,
 		     unsigned int *interval,
 		     int *no_jitter,
 		     unsigned long *count,
@@ -189,7 +189,7 @@ static void get_args(int argc,
 			}
 			break;
 		case 'I':
-			ret = strtoi_generic(optarg, *p_msg_id_hash);
+			ret = strtoi_generic(optarg, *msg_id_hash);
 			if (ret < 0) {
 				fprintf(stderr,
 					"Error: invalid message hash id '%s'\n\n",
@@ -252,7 +252,7 @@ static void get_args(int argc,
 	}
 
 	if (!msg_id_hash_found)
-		*p_msg_id_hash = NULL;
+		*msg_id_hash = NULL;
 }
 
 int main(int argc, char *argv[])
@@ -267,8 +267,8 @@ int main(int argc, char *argv[])
 	char *payload_filename = NULL;
 	struct sap_ctx *ctx;
 	int msg_type = -1;
-	uint16_t msg_id_hash;
-	uint16_t *p_msg_id_hash = &msg_id_hash;
+	uint16_t msg_id_hash_store;
+	uint16_t *msg_id_hash = &msg_id_hash_store;
 	unsigned int interval = 0;
 	int no_jitter = 0;
 	unsigned long count = 0;
@@ -278,12 +278,12 @@ int main(int argc, char *argv[])
 	get_args(argc, argv, &addr_family, &payload_dests, num_payload_dests,
 		 &sap_dests, num_sap_dests, &disable_dests_from_sdp,
 		 &payload_filename, &payload_type, &enable_compression,
-		 &msg_type, &p_msg_id_hash, &interval, &no_jitter, &count,
+		 &msg_type, &msg_id_hash, &interval, &no_jitter, &count,
 		 &bw_limit);
 
 	ctx = sap_init_custom(payload_dests, sap_dests, disable_dests_from_sdp,
 			      addr_family, payload_filename, payload_type,
-			      enable_compression, msg_type, p_msg_id_hash,
+			      enable_compression, msg_type, msg_id_hash,
 			      interval, no_jitter, count, bw_limit);
 	if (!ctx) {
 		usage(argv[0]);
