@@ -884,31 +884,36 @@ sap_init_ctx_dest(struct sap_ctx *ctx, char *dest, int pay_to_sap_dest,
 	ctx_dest->num_sessions = 0;
 	ctx_dest->num_ha_sessions = 0;
 
+	if (mtx_init(&ctx_dest->sessions_lock, mtx_plain) == thrd_error)
+		goto err1;
+
 	ctx_dest->timer_fd = timerfd_create(CLOCK_MONOTONIC, O_NONBLOCK);
 	if (ctx_dest->timer_fd < 0)
-		goto err1;
+		goto err2;
 
 	ret = sap_create_socket(ctx_dest, dest, pay_to_sap_dest, dest_af,
 				orig_src);
 	if (ret < 0)
-		goto err2;
+		goto err3;
 
 	sap_create_message(ctx_dest, payload, payload_len, payload_type,
 			   compressed, msg_type, msg_id_hash);
 	if (!ctx_dest->message)
-		goto err3;
+		goto err4;
 
 	ret = sap_init_ctx_dest_add_epoll(ctx_dest);
 	if (ret < 0)
-		goto err4;
+		goto err5;
 
 	return ctx_dest;
-err4:
+err5:
 	free(ctx_dest->message);
-err3:
+err4:
 	sap_free_socket(ctx_dest);
-err2:
+err3:
 	close(ctx_dest->timer_fd);
+err2:
+	mtx_destroy(&ctx_dest->sessions_lock);
 err1:
 	free(ctx_dest);
 	return NULL;
@@ -920,6 +925,7 @@ static void sap_free_ctx_dest(struct sap_ctx_dest *ctx_dest)
 	free(ctx_dest->message);
 	sap_free_socket(ctx_dest);
 	close(ctx_dest->timer_fd);
+	mtx_destroy(&ctx_dest->sessions_lock);
 	free(ctx_dest);
 }
 

@@ -1,7 +1,12 @@
 /* SPDX-FileCopyrightText: 2024 Linus Lüssing <linus.luessing@c0d3.blue> */
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 
+#include <config.h>
+
 #include <errno.h>
+#ifdef HAVE_JSON_C
+	#include <json-c/json.h>
+#endif
 #include <limits.h>
 #include <netinet/in.h>
 #include <signal.h>
@@ -333,10 +338,12 @@ sap_session_get_or_add(struct sap_ctx_dest *ctx_dest,
 		ctx_dest->num_sessions++;
 	}
 
+	mtx_lock(&ctx_dest->sessions_lock);
 	if (!session)
 		hlist_add_head(&new_session->node, sessions_list);
 	else
 		hlist_add_behind(&new_session->node, &session->node);
+	mtx_unlock(&ctx_dest->sessions_lock);
 
 	return new_session;
 }
@@ -365,7 +372,10 @@ static int sap_session_del(struct sap_ctx_dest *ctx_dest,
 
 	ret = 0;
 err:
+	mtx_lock(&ctx_dest->sessions_lock);
 	hlist_del(&session->node);
+	mtx_unlock(&ctx_dest->sessions_lock);
+
 	free(session);
 	return ret;
 
@@ -746,3 +756,240 @@ void sap_stop(struct sap_ctx *ctx)
 	}
 	mtx_unlock(&ctx->thread.ctrl_lock);
 }
+
+static void sap_status_dump_own(struct sap_ctx_dest *ctx_dest,
+		    int (*callback)(struct sap_status_entry *entry, void *data),
+		    void *cb_data)
+{
+	struct sap_status_entry entry;
+	uint16_t hash;
+
+	entry.dest = ctx_dest->dest;
+	entry.src = ctx_dest->src;
+	entry.orig_src = ctx_dest->orig_src;
+	hash = ((struct sap_packet *)ctx_dest->message)->msg_id_hash;
+	entry.msg_id_hash = ntohs(hash);
+	entry.status = SAP_STATUS_ADD;
+	entry.type = SAP_STATUS_OWN;
+
+	callback(&entry, cb_data);
+}
+
+static void sap_status_dump_other(struct sap_ctx_dest *ctx_dest,
+		    int (*callback)(struct sap_status_entry *entry,
+				    void *data),
+		    void *cb_data)
+{
+	struct sap_session_entry *session;
+	struct sap_status_entry entry;
+
+	mtx_lock(&ctx_dest->sessions_lock);
+	hlist_for_each_entry(session, &ctx_dest->sessions_list, node) {
+		entry.dest = ctx_dest->dest;
+		memset(&entry.src, 0, sizeof(entry.src));
+		entry.orig_src = session->orig_src;
+		entry.msg_id_hash = session->msg_id_hash;
+		entry.status = SAP_STATUS_ADD;
+		entry.type = SAP_STATUS_NORMAL;
+
+		callback(&entry, cb_data);
+	}
+	mtx_unlock(&ctx_dest->sessions_lock);
+}
+
+static void sap_status_dump_ha(struct sap_ctx_dest *ctx_dest,
+		    int (*callback)(struct sap_status_entry *entry,
+				    void *data),
+		    void *cb_data)
+{
+	struct sap_session_entry *session;
+	struct sap_status_entry entry;
+
+	mtx_lock(&ctx_dest->sessions_lock);
+	hlist_for_each_entry(session, &ctx_dest->ha_sessions_list,
+			     node) {
+		entry.dest = ctx_dest->dest;
+		entry.src = session->orig_src;
+		memset(&entry.orig_src, 0, sizeof(entry.orig_src));
+		entry.msg_id_hash = session->msg_id_hash;
+		entry.status = SAP_STATUS_ADD;
+		entry.type = SAP_STATUS_HA;
+
+		callback(&entry, cb_data);
+	}
+	mtx_unlock(&ctx_dest->sessions_lock);
+}
+
+int sap_status_dump(struct sap_ctx *ctx,
+		    int (*callback)(struct sap_status_entry *entry,
+				    void *data),
+		    void *cb_data)
+{
+	struct sap_ctx_dest *ctx_dest;
+
+	if (ctx->term)
+		return -ESHUTDOWN;
+
+	hlist_for_each_entry(ctx_dest, &ctx->dest_list, node) {
+		sap_status_dump_own(ctx_dest, callback, cb_data);
+		sap_status_dump_other(ctx_dest, callback, cb_data);
+		sap_status_dump_ha(ctx_dest, callback, cb_data);
+	}
+
+	return 0;
+}
+
+static const char *inet_ntop_46(const union sap_sockaddr_union *src, char *dst,
+				socklen_t dst_size)
+{
+	switch (src->s.sa_family) {
+	case AF_INET:
+		return inet_ntop(AF_INET, &src->in.sin_addr, dst, dst_size);
+	case AF_INET6:
+		return inet_ntop(AF_INET6, &src->in6.sin6_addr, dst, dst_size);
+	}
+
+	return NULL;
+}
+
+#ifdef HAVE_JSON_C
+static int sap_status_dump_json_own(struct sap_ctx_dest *ctx_dest,
+				    struct json_object *dest_obj)
+{
+	struct sap_packet *packet = (struct sap_packet *)ctx_dest->message;
+	char src[INET6_ADDRSTRLEN];
+	char orig_src[INET6_ADDRSTRLEN];
+	char msg_id[strlen("0x1234") + 1];
+	struct json_object *own_obj, *src_obj, *orig_src_obj, *msg_id_obj;
+
+	inet_ntop_46(&ctx_dest->src, src, sizeof(src));
+	inet_ntop_46(&ctx_dest->orig_src, orig_src, sizeof(orig_src));
+	snprintf(msg_id, sizeof(msg_id), "0x%04x", ntohs(packet->msg_id_hash));
+
+	own_obj = json_object_new_object();
+	src_obj = json_object_new_string(src);
+	orig_src_obj = json_object_new_string(orig_src);
+	msg_id_obj = json_object_new_string(msg_id);
+
+	if (!own_obj || !src_obj || !orig_src_obj || !msg_id_obj)
+		return -ENOMEM;
+
+	json_object_object_add(own_obj, "src", src_obj);
+	json_object_object_add(own_obj, "orig-src", orig_src_obj);
+	json_object_object_add(own_obj, "msg-id-hash", msg_id_obj);
+	json_object_object_add(dest_obj, "own", own_obj);
+
+	return 0;
+}
+
+static int sap_status_dump_json_session(struct sap_ctx_dest *ctx_dest,
+					struct json_object *dest_obj,
+					struct hlist_head *sessions_list,
+					char *src_key, char *msg_id_key,
+					char *session_key)
+{
+	struct json_object *session_obj, *obj, *orig_src_obj, *msg_id_obj;
+	struct sap_session_entry *session;
+	char orig_src[INET6_ADDRSTRLEN];
+	char msg_id[strlen("0x1234") + 1];
+
+	session_obj = json_object_new_array();
+	if (!session_obj)
+		return -ENOMEM;
+
+	mtx_lock(&ctx_dest->sessions_lock);
+	hlist_for_each_entry(session, sessions_list, node) {
+		inet_ntop_46(&session->orig_src, orig_src, sizeof(orig_src));
+		snprintf(msg_id, sizeof(msg_id), "0x%04x",
+			 session->msg_id_hash);
+
+		obj = json_object_new_object();
+		orig_src_obj = json_object_new_string(orig_src);
+		if (!obj || !orig_src_obj)
+			return -ENOMEM;
+
+		if (msg_id_key) {
+			msg_id_obj = json_object_new_string(msg_id);
+			if (!msg_id_obj)
+				return -ENOMEM;
+
+			json_object_object_add(obj, msg_id_key, msg_id_obj);
+		}
+
+		json_object_object_add(obj, src_key, orig_src_obj);
+		json_object_array_add(session_obj, obj);
+	}
+	mtx_unlock(&ctx_dest->sessions_lock);
+
+	json_object_object_add(dest_obj, session_key, session_obj);
+
+	return 0;
+}
+
+static int sap_status_dump_json_other(struct sap_ctx_dest *ctx_dest,
+				      struct json_object *dest_obj)
+{
+	return sap_status_dump_json_session(ctx_dest, dest_obj,
+					    &ctx_dest->sessions_list,
+					    "orig-src", "msg-id-hash", "other");
+}
+
+static int sap_status_dump_json_ha(struct sap_ctx_dest *ctx_dest,
+				   struct json_object *dest_obj)
+{
+	return sap_status_dump_json_session(ctx_dest, dest_obj,
+					    &ctx_dest->ha_sessions_list, "src",
+					    NULL, "high-availability");
+}
+
+int sap_status_dump_json(struct sap_ctx *ctx, int fd)
+{
+	struct json_object *obj, *dests_obj, *dest_obj;
+	char dest[INET6_ADDRSTRLEN];
+	struct sap_ctx_dest *ctx_dest;
+	FILE *file;
+	const char *json_str;
+
+	if (ctx->term)
+		return -ESHUTDOWN;
+
+	file = fdopen(fd, "a");
+	if (!file)
+		return -EINVAL;
+
+	obj = json_object_new_object();
+	dests_obj = json_object_new_object();
+	if (!obj || !dests_obj)
+		return -ENOMEM;
+
+	json_object_object_add(obj, "destinations", dests_obj);
+
+	hlist_for_each_entry(ctx_dest, &ctx->dest_list, node) {
+		inet_ntop_46(&ctx_dest->dest, dest, sizeof(dest));
+
+		dest_obj = json_object_new_object();
+
+		if (!dest_obj)
+			goto err;
+
+		sap_status_dump_json_own(ctx_dest, dest_obj);
+		sap_status_dump_json_other(ctx_dest, dest_obj);
+		sap_status_dump_json_ha(ctx_dest, dest_obj);
+		json_object_object_add(dests_obj, dest, dest_obj);
+	}
+
+	json_str = json_object_to_json_string_ext(obj, JSON_C_TO_STRING_PRETTY);
+	fprintf(file, "%s\n", json_str);
+	fflush(file);
+	json_object_put(obj);
+
+	return 0;
+err:
+	return -ENOMEM;
+}
+#else
+int sap_status_dump_json(struct sap_ctx *ctx, int fd)
+{
+	return -ENOTSUP;
+}
+#endif /* HAVE_JSON_C */

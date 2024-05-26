@@ -3,6 +3,7 @@
 
 #include <config.h>
 
+#include <arpa/inet.h>
 #include <errno.h>
 #include <limits.h>
 #include <signal.h>
@@ -21,6 +22,11 @@ static struct sap_ctx *p_sap_ctx = NULL;
 void signal_handler_shutdown(int signum)
 {
 	sap_term(p_sap_ctx);
+}
+
+void signal_handler_status(int signum)
+{
+	sap_status_dump_json(p_sap_ctx, STDOUT_FILENO);
 }
 
 void setup_signal_handler(struct sap_ctx *ctx)
@@ -44,6 +50,11 @@ void setup_signal_handler(struct sap_ctx *ctx)
 	sigaction(SIGTERM, NULL, &old_action);
 	if (old_action.sa_handler != SIG_IGN)
 		sigaction(SIGTERM, &new_action, NULL);
+
+	new_action.sa_handler = &signal_handler_status;
+	sigaction(SIGUSR1, NULL, &old_action);
+	if (old_action.sa_handler != SIG_IGN)
+		sigaction(SIGUSR1, &new_action, NULL);
 }
 
 static void usage(char *prog)

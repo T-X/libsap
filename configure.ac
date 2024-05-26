@@ -29,6 +29,28 @@ AS_IF([test "x$with_zlib" != xno],
     ])
   ])
 
+AC_ARG_WITH([json-c],
+  [AS_HELP_STRING([--with-json-c],
+    [use json-c for JSON formatted status functions @<:@default=check@:>@])],
+  [],
+  [with_json_c=check])
+
+JSONC=
+AS_IF([test "x$with_json_c" != xno],
+  [AC_CHECK_HEADERS([json-c/json.h],
+    [AC_CHECK_LIB([json-c], [json_object_new_object],
+      [AC_SUBST([JSONC], ["-ljson-c"])
+       AC_DEFINE([HAVE_JSON_C], [1],
+                 [Define if you have json-c])
+      ],
+      [if test "x$with_json-c" != xcheck; then
+         AC_MSG_FAILURE(
+           [--with-json-c was given, but test for json-c failed])
+       fi
+      ], )
+    ])
+  ])
+
 AM_INIT_AUTOMAKE([1.11 subdir-objects -Wall -Werror])
 AM_PROG_AR
 LT_INIT
