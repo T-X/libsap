@@ -328,6 +328,8 @@ out:
 * If "-p" is a file, check if it was either amended or replaced for updates?
 * authentication
 * encryption
+* SAP reception message:
+ * buffer, skip (pot.) auth header, decompress, add to (verbose?) status output
 * shrink SAP terminate message size
 * replace / add alternatives for Linux-isms? make multi-platform compatible
 * add an MTU / packet size limit option, defaulting to 1000 bytes per RFC
