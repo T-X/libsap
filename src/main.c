@@ -111,25 +111,25 @@ static unsigned int get_num_dests(int argc, char *argv[], char type)
 	return num_dests;
 }
 
-static void get_args(int argc,
-		     char *argv[],
-		     int *addr_family,
-		     char ***payload_dests,
-		     unsigned int num_payload_dests,
-		     char ***sap_dests,
-		     unsigned int num_sap_dests,
-		     int *disable_dests_from_sdp,
-		     char **payload_filename,
-		     char **payload_type,
-		     int *enable_compression,
-		     int *enable_rand_msg_id_hash,
-		     int *msg_type,
-		     uint16_t **msg_id_hash,
-		     char **orig_src,
-		     unsigned int *interval,
-		     int *no_jitter,
-		     unsigned long *count,
-		     long *bw_limit)
+static int get_args(int argc,
+		    char *argv[],
+		    int *addr_family,
+		    char ***payload_dests,
+		    unsigned int num_payload_dests,
+		    char ***sap_dests,
+		    unsigned int num_sap_dests,
+		    int *disable_dests_from_sdp,
+		    char **payload_filename,
+		    char **payload_type,
+		    int *enable_compression,
+		    int *enable_rand_msg_id_hash,
+		    int *msg_type,
+		    uint16_t **msg_id_hash,
+		    char **orig_src,
+		    unsigned int *interval,
+		    int *no_jitter,
+		    unsigned long *count,
+		    long *bw_limit)
 {
 	int msg_id_hash_found = 0;
 	int payload_dests_idx = 0;
@@ -140,7 +140,7 @@ static void get_args(int argc,
 	if (argc < 1) {
 		fprintf(stderr, "Error: no own program name?\n");
 		usage("<program>");
-		exit(1);
+		return -EINVAL;
 	}
 
 	if (num_payload_dests) {
@@ -151,7 +151,7 @@ static void get_args(int argc,
 			fprintf(stderr,
 				"Error: Could not allocate payload destinations\n");
 			usage(argv[0]);
-			exit(1);
+			return -EINVAL;
 		}
 	}
 
@@ -162,7 +162,7 @@ static void get_args(int argc,
 			fprintf(stderr,
 				"Error: Could not allocate SAP destinations\n");
 			usage(argv[0]);
-			exit(1);
+			return -EINVAL;
 		}
 	}
 
@@ -207,7 +207,7 @@ static void get_args(int argc,
 					"Error: unknown message type '%s'\n\n",
 					optarg);
 				usage(argv[0]);
-				exit(1);
+				return -EINVAL;
 			}
 			break;
 		case 'I':
@@ -217,7 +217,7 @@ static void get_args(int argc,
 					"Error: invalid message hash id '%s'\n\n",
 					optarg);
 				usage(argv[0]);
-				exit(1);
+				return -EINVAL;
 			}
 			msg_id_hash_found = 1;
 			break;
@@ -235,7 +235,7 @@ static void get_args(int argc,
 					"Error: invalid interval '%s'\n\n",
 					optarg);
 				usage(argv[0]);
-				exit(1);
+				return -EINVAL;
 			}
 			break;
 		case 'c':
@@ -244,7 +244,7 @@ static void get_args(int argc,
 				fprintf(stderr, "Error: invalid count '%s'\n\n",
 					optarg);
 				usage(argv[0]);
-				exit(1);
+				return -EINVAL;
 			}
 			break;
 		case 'b':
@@ -254,7 +254,7 @@ static void get_args(int argc,
 					"Error: invalid bandwidth limit '%s'\n\n",
 					optarg);
 				usage(argv[0]);
-				exit(1);
+				return -EINVAL;
 			}
 			break;
 		case 'C':
@@ -269,7 +269,7 @@ static void get_args(int argc,
 			break;
 		case 'h':
 			usage(argv[0]);
-			exit(0);
+			return -ESHUTDOWN;
 		}
 	}
 
@@ -277,13 +277,21 @@ static void get_args(int argc,
 		fprintf(stderr,
 			"Error: '-4' and '-6' are mutually exclusive\n\n");
 		usage(argv[0]);
-		exit(1);
+		return -EINVAL;
 	}
 
 	if (!msg_id_hash_found)
 		*msg_id_hash = NULL;
 	if (!orig_src_found)
 		*orig_src = NULL;
+
+	return 0;
+}
+
+static void free_args(char **payload_dests, char **sap_dests)
+{
+	free(payload_dests);
+	free(sap_dests);
 }
 
 int main(int argc, char *argv[])
@@ -307,13 +315,25 @@ int main(int argc, char *argv[])
 	long bw_limit = 0;
 	int enable_compression = 0;
 	int enable_rand_msg_id_hash = 0;
+	int ret;
 
-	get_args(argc, argv, &addr_family, &payload_dests, num_payload_dests,
-		 &sap_dests, num_sap_dests, &disable_dests_from_sdp,
-		 &payload_filename, &payload_type, &enable_compression,
-		 &enable_rand_msg_id_hash, &msg_type, &msg_id_hash, &orig_src,
-		 &interval, &no_jitter, &count, &bw_limit);
+	ret = get_args(argc, argv, &addr_family, &payload_dests,
+		       num_payload_dests, &sap_dests, num_sap_dests,
+		       &disable_dests_from_sdp, &payload_filename,
+		       &payload_type, &enable_compression,
+		       &enable_rand_msg_id_hash, &msg_type, &msg_id_hash,
+		       &orig_src, &interval, &no_jitter, &count, &bw_limit);
+	if (ret < 0) {
+		if (ret == -ESHUTDOWN) {
+			ret = 0;
+			goto out;
+		}
 
+		ret = 1;
+		goto out;
+	}
+
+	ret = 1;
 	ctx = sap_init_custom(payload_dests, sap_dests, disable_dests_from_sdp,
 			      addr_family, payload_filename, payload_type,
 			      enable_compression, enable_rand_msg_id_hash,
@@ -321,7 +341,7 @@ int main(int argc, char *argv[])
 			      no_jitter, count, bw_limit);
 	if (!ctx) {
 		usage(argv[0]);
-		exit(1);
+		goto out;
 	}
 
 	setup_signal_handler(ctx);
@@ -333,7 +353,9 @@ int main(int argc, char *argv[])
 	/* do stuff here */
 //	sap_stop(ctx);
 
+	ret = 0;
 	sap_free(ctx);
-
-	return 0;
+out:
+	free_args(payload_dests, sap_dests);
+	return ret;
 }
