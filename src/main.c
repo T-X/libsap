@@ -358,7 +358,7 @@ int main(int argc, char *argv[])
 	long bw_limit = 0;
 	int enable_compression = 0;
 	int enable_rand_msg_id_hash = 0;
-//	int ret;
+	int ret;
 
 	get_args(argc, argv, &addr_family, &payload_dests, num_payload_dests,
 		 &sap_dests, num_sap_dests, &disable_dests_from_sdp,
@@ -378,19 +378,25 @@ int main(int argc, char *argv[])
 
 	setup_signal_handler(ctx);
 
-	sap_run(ctx);
+//	sap_run(ctx);
 
 	/* alternative to blocking sap_run(), run threaded: */
-//	sap_start(ctx);
+	sap_start(ctx);
 	/* do stuff here */
+	while (1) {
+		ret = sap_status_dump_json(ctx, STDOUT_FILENO);
+		if (ret < 0)
+			break;
+		sleep(5);
+	}
 	//for (int i = 0; i < 6; i++) {
 /*	while (1) {
 		ret = sap_status_dump(ctx, my_dump_cb, NULL);
 		if (ret < 0)
 			break;
 		sleep(5);
-	}
-	sap_stop(ctx);*/
+	}*/
+	sap_stop(ctx);
 
 	sap_free(ctx);
 

@@ -90,6 +90,8 @@ struct sap_ctx_dest {
 	/* TODO: maybe convert to hash map? */
 	struct hlist_head sessions_list;
 	struct hlist_head ha_sessions_list;
+	/* protects status dump on (ha_)sessions_list when multi-hreaded */
+	mtx_t sessions_lock;
 //	struct sap_status_entry event_list;
 };
 

@@ -338,10 +338,12 @@ sap_session_get_or_add(struct sap_ctx_dest *ctx_dest,
 		ctx_dest->num_sessions++;
 	}
 
+	mtx_lock(&ctx_dest->sessions_lock);
 	if (!session)
 		hlist_add_head(&new_session->node, sessions_list);
 	else
 		hlist_add_behind(&new_session->node, &session->node);
+	mtx_unlock(&ctx_dest->sessions_lock);
 
 	return new_session;
 }
@@ -370,7 +372,10 @@ static int sap_session_del(struct sap_ctx_dest *ctx_dest,
 
 	ret = 0;
 err:
+	mtx_lock(&ctx_dest->sessions_lock);
 	hlist_del(&session->node);
+	mtx_unlock(&ctx_dest->sessions_lock);
+
 	free(session);
 	return ret;
 
@@ -778,6 +783,7 @@ static void sap_status_dump_other(struct sap_ctx_dest *ctx_dest,
 	struct sap_session_entry *session;
 	struct sap_status_entry entry;
 
+	mtx_lock(&ctx_dest->sessions_lock);
 	hlist_for_each_entry(session, &ctx_dest->sessions_list, node) {
 		entry.dest = ctx_dest->dest;
 		memset(&entry.src, 0, sizeof(entry.src));
@@ -788,6 +794,7 @@ static void sap_status_dump_other(struct sap_ctx_dest *ctx_dest,
 
 		callback(&entry, cb_data);
 	}
+	mtx_unlock(&ctx_dest->sessions_lock);
 }
 
 static void sap_status_dump_ha(struct sap_ctx_dest *ctx_dest,
@@ -798,6 +805,7 @@ static void sap_status_dump_ha(struct sap_ctx_dest *ctx_dest,
 	struct sap_session_entry *session;
 	struct sap_status_entry entry;
 
+	mtx_lock(&ctx_dest->sessions_lock);
 	hlist_for_each_entry(session, &ctx_dest->ha_sessions_list,
 			     node) {
 		entry.dest = ctx_dest->dest;
@@ -809,6 +817,7 @@ static void sap_status_dump_ha(struct sap_ctx_dest *ctx_dest,
 
 		callback(&entry, cb_data);
 	}
+	mtx_unlock(&ctx_dest->sessions_lock);
 }
 
 int sap_status_dump(struct sap_ctx *ctx,
@@ -884,6 +893,7 @@ static int sap_status_dump_json_session(struct sap_ctx_dest *ctx_dest, struct js
 	if (!session_obj)
 		return -ENOMEM;
 
+	mtx_lock(&ctx_dest->sessions_lock);
 	hlist_for_each_entry(session, sessions_list, node) {
 		inet_ntop_46(&session->orig_src, orig_src, sizeof(orig_src));
 		snprintf(msg_id, sizeof(msg_id), "0x%04x", session->msg_id_hash);
@@ -904,6 +914,7 @@ static int sap_status_dump_json_session(struct sap_ctx_dest *ctx_dest, struct js
 		json_object_object_add(obj, src_key, orig_src_obj);
 		json_object_array_add(session_obj, obj);
 	}
+	mtx_unlock(&ctx_dest->sessions_lock);
 
 	json_object_object_add(dest_obj, session_key, session_obj);
 
