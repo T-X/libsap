@@ -8,8 +8,9 @@ SAP/[RFC2974](https://datatracker.ietf.org/doc/html/rfc2974).
 ## Build
 
 Requires: autoconf, libtool
+Recommended: json-c, libb2 (blake2 library)
 
-(Debian: `$ apt-get install autoconf libtool`)
+(Debian: `$ apt-get install autoconf libtool libjson-c-dev libb2-dev`)
 
 ```
 $ git clone https://github.com/T-X/libsap.git
@@ -30,6 +31,7 @@ Options:
     -p <file|fifo|->                    Payload file (default: -)
     -b <bw-limit>                       Total bits/s for all sessions in an SAP group (default: 4000)
     -C                                  Disable compression
+    -r                                  Use a random message ID hash (default: BLAKE2 over SAP packet)
     -h                                  This help page
 
 Debug options: (typ. not RFC compliant)
@@ -37,7 +39,8 @@ Debug options: (typ. not RFC compliant)
     -S <address|hostname>               SAP destination (default: from payload destinations only)
     -t <type>                           Payload type (default: "application/sdp")
     -T <announce|terminate>             Message type, sets debug mode (default: standard/daemon mode)
-    -I <msg-id-hash>                    Message ID hash (default: random)
+    -I <msg-id-hash>                    Message ID hash (default: BLAKE2 over full SAP packet)
+    -O <ipv4-address|ipv6-address>      Orig source (default: from IP source address)
     -i <interval>                       Interval override in seconds (default: 300)
     -J                                  Disable interval jitter
     -c <count>                          Number of messages to send
@@ -84,7 +87,25 @@ Defaults to 4000 (bits/s).
 Disable the SAP zlib compression feature, transfer the payload and
 payload type uncompressed, in plaintext.
 
+**-r:**
+
+Use a random message ID hash instead of using a deterministic
+message ID hash calculated through BLAKE2 over the full SAP packet.
+
 Debug options:
+
+**-D:**
+
+Disable payload destination from SDP payload detection. Only use
+SAP packet destinations through the "-d" and "-S" options.
+
+**-S <address|hostname>:**
+
+Set one or more specific SAP destination addresses, used in the SAP
+packet's IP header destination. This can be an IPv4/IPv6 multicast
+address or a hostname (which resolves to an IPv4/IPv6 multicast address).
+
+This option can be specified multiple times.
 
 **-t <type>:**
 
@@ -114,6 +135,18 @@ number between 0x0000 and 0xffff (or 0xFFFF).
 
 You might want to use it when using the "-T terminate" option to
 terminate a specific SAP session.
+
+**-O <ipv4-address|ipv6-address>:**
+
+Set an explicit SAP originating source address. This can be an
+IPv4 or IPv6 address and should be a unicast one.
+
+If unset then this will be retrieved and the same as the IP headers
+source address.
+
+Changing this from the default can be useful for a redundant,
+high-availability SAP sender for the same
+SAP payload / msg-id-hash / SAP orig-src on another host.
 
 **-i <interval>:**
 
@@ -185,19 +218,27 @@ If "-T" was given for an explicit message type then we won't send the
 SAP terminate messages as we assume that the sap tool is used in a full control
 "debug mode".
 
+If the sap tool receives a SIGUSR1 then it will dump the current, detected
+sessions' statuses to standard out in JSON format.
+
 ## Usage: libsap
 
 ```C
 struct sap_ctx *sap_init_custom(char *payload_dests[],
-                                int payload_dest_af,
-                                char *payload_filename,
-                                char *payload_type,
-                                int msg_type,
-                                uint16_t *msg_id_hash,
-                                unsigned int interval,
-                                int no_jitter,
-                                unsigned long count,
-                                long bw_limit);
+				char *sap_dests[],
+				int disable_dests_from_sdp,
+				int payload_dest_af,
+				char *payload_filename,
+				char *payload_type,
+				int enable_compression,
+				int enable_rand_msg_id_hash,
+				int msg_type,
+				uint16_t *msg_id_hash,
+				char *orig_src,
+				unsigned int interval,
+				int no_jitter,
+				unsigned long count,
+				long bw_limit);
 struct sap_ctx *sap_init_fast(char *payload_filename);
 struct sap_ctx *sap_init(char *payload_filename);
 
@@ -207,6 +248,11 @@ void sap_stop(struct sap_ctx *ctx);
 void sap_term(struct sap_ctx *ctx);
 
 void sap_free(struct sap_ctx *ctx);
+
+int sap_status_dump(struct sap_ctx *ctx,
+		    int (*callback)(struct sap_status_entry *entry, void *data),
+		    void *cb_data);
+int sap_status_dump_json(struct sap_ctx *ctx, int fd);
 ```
 
 ### libsap example, single-threaded, blocking
@@ -279,16 +325,15 @@ out:
 
 * If "-p" is a pipe, keep it  open and update session if new SDP is received
   (use "\r\n\r\n" and/or "\0" as delimeters?)
+* If "-p" is a file, check if it was either amended or replaced for updates?
 * authentication
 * encryption
 * shrink SAP terminate message size
 * replace / add alternatives for Linux-isms? make multi-platform compatible
 * add an MTU / packet size limit option, defaulting to 1000 bytes per RFC
   (we can't use/enforce IP fragmentation for UDP/multicast packets or can we?)
-* add a "-O" option to set an explicit/alternative SAP orig-source address
 * some more verbose output for sap tool?
 * add getopt\_long() / long option names to sap tool
-* add SIGUSR1 for status output to stdout to sap tool?
 * add a `payload_fd` option as an alternative to `payload_filename` to
   `sap_init_custom()`?
 * add a `sap_run_noblock()` variant, together with an `sap_pollfd()`
