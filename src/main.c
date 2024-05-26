@@ -56,7 +56,7 @@ static void usage(char *prog)
 	printf("    -d <address|hostname>               Payload's destination (default: from c= in SDP payload)\n");
 	printf("    -p <file|fifo|->                    Payload file (default: -)\n");
 	printf("    -b <bw-limit>                       Total bits/s for all sessions in an SAP group (default: 4000)\n");
-#ifdef HAVE_ZLIB_H
+#ifdef HAVE_ZLIB
 	printf("    -C                                  Disable compression\n");
 #endif
 	printf("    -h                                  This help page\n");
@@ -232,7 +232,7 @@ static void get_args(int argc,
 			}
 			break;
 		case 'C':
-#ifdef HAVE_ZLIB_H
+#ifdef HAVE_ZLIB
 			*enable_compression = -1;
 #endif
 			break;

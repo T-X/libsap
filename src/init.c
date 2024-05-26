@@ -12,7 +12,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/timerfd.h>
-#ifdef HAVE_ZLIB_H
+#ifdef HAVE_ZLIB
 	#include <zlib.h>
 #endif
 
