@@ -285,8 +285,6 @@ out:
 * replace / add alternatives for Linux-isms? make multi-platform compatible
 * add an MTU / packet size limit option, defaulting to 1000 bytes per RFC
   (we can't use/enforce IP fragmentation for UDP/multicast packets or can we?)
-* add a "-D" option for an explicit SAP group multicast address
-  (VLC has such an option)
 * add a "-O" option to set an explicit/alternative SAP orig-source address
 * some more verbose output for sap tool?
 * add getopt\_long() / long option names to sap tool
