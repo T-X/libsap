@@ -628,8 +628,8 @@ static int sap_run_thread(void *arg)
 
 int sap_start(struct sap_ctx *ctx)
 {
+	int ret = 0;
 	thrd_t tid;
-	int ret;
 
 	mtx_lock(&ctx->thread.ctrl_lock);
 	/* already running */
