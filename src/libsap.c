@@ -888,14 +888,19 @@ static int sap_status_dump_json_own(struct sap_ctx_dest *ctx_dest,
 	msg_id_obj = json_object_new_string(msg_id);
 
 	if (!own_obj || !src_obj || !orig_src_obj || !msg_id_obj)
-		return -ENOMEM;
+		goto err;
 
 	json_object_object_add(own_obj, "src", src_obj);
 	json_object_object_add(own_obj, "orig-src", orig_src_obj);
 	json_object_object_add(own_obj, "msg-id-hash", msg_id_obj);
 	json_object_object_add(dest_obj, "own", own_obj);
-
 	return 0;
+err:
+	json_object_put(msg_id_obj);
+	json_object_put(orig_src_obj);
+	json_object_put(src_obj);
+	json_object_put(own_obj);
+	return -ENOMEM;
 }
 
 static int sap_status_dump_json_session(struct sap_ctx_dest *ctx_dest,
@@ -913,6 +918,8 @@ static int sap_status_dump_json_session(struct sap_ctx_dest *ctx_dest,
 	if (!session_obj)
 		return -ENOMEM;
 
+	json_object_object_add(dest_obj, session_key, session_obj);
+
 	mtx_lock(&ctx_dest->sessions_lock);
 	hlist_for_each_entry(session, sessions_list, node) {
 		inet_ntop_46(&session->orig_src, orig_src, sizeof(orig_src));
@@ -921,8 +928,14 @@ static int sap_status_dump_json_session(struct sap_ctx_dest *ctx_dest,
 
 		obj = json_object_new_object();
 		orig_src_obj = json_object_new_string(orig_src);
-		if (!obj || !orig_src_obj)
+		if (!obj || !orig_src_obj) {
+			json_object_put(obj);
+			json_object_put(orig_src_obj);
 			return -ENOMEM;
+		}
+
+		json_object_object_add(obj, src_key, orig_src_obj);
+		json_object_array_add(session_obj, obj);
 
 		if (msg_id_key) {
 			msg_id_obj = json_object_new_string(msg_id);
@@ -931,13 +944,8 @@ static int sap_status_dump_json_session(struct sap_ctx_dest *ctx_dest,
 
 			json_object_object_add(obj, msg_id_key, msg_id_obj);
 		}
-
-		json_object_object_add(obj, src_key, orig_src_obj);
-		json_object_array_add(session_obj, obj);
 	}
 	mtx_unlock(&ctx_dest->sessions_lock);
-
-	json_object_object_add(dest_obj, session_key, session_obj);
 
 	return 0;
 }
@@ -963,20 +971,28 @@ int sap_status_dump_json(struct sap_ctx *ctx, int fd)
 	struct json_object *obj, *dests_obj, *dest_obj;
 	char dest[INET6_ADDRSTRLEN];
 	struct sap_ctx_dest *ctx_dest;
+	int fd_dup;
 	FILE *file;
 	const char *json_str;
+	int ret = -ENOMEM;
 
 	if (ctx->term)
 		return -ESHUTDOWN;
 
-	file = fdopen(fd, "a");
-	if (!file)
+	fd_dup = dup(fd);
+	if (fd_dup < 0)
+		return -ENOENT;
+
+	file = fdopen(fd_dup, "a");
+	if (!file) {
+		close(fd_dup);
 		return -EINVAL;
+	}
 
 	obj = json_object_new_object();
 	dests_obj = json_object_new_object();
 	if (!obj || !dests_obj)
-		return -ENOMEM;
+		goto err1;
 
 	json_object_object_add(obj, "destinations", dests_obj);
 
@@ -984,24 +1000,27 @@ int sap_status_dump_json(struct sap_ctx *ctx, int fd)
 		inet_ntop_46(&ctx_dest->dest, dest, sizeof(dest));
 
 		dest_obj = json_object_new_object();
-
 		if (!dest_obj)
-			goto err;
+			goto err2;
 
-		sap_status_dump_json_own(ctx_dest, dest_obj);
-		sap_status_dump_json_other(ctx_dest, dest_obj);
-		sap_status_dump_json_ha(ctx_dest, dest_obj);
 		json_object_object_add(dests_obj, dest, dest_obj);
+
+		if (sap_status_dump_json_own(ctx_dest, dest_obj) < 0 ||
+		    sap_status_dump_json_other(ctx_dest, dest_obj) < 0 ||
+		    sap_status_dump_json_ha(ctx_dest, dest_obj) < 0)
+			goto err2;
 	}
 
 	json_str = json_object_to_json_string_ext(obj, JSON_C_TO_STRING_PRETTY);
 	fprintf(file, "%s\n", json_str);
-	fflush(file);
+	ret = 0;
+err2:
+	dests_obj = NULL; /* obj has reference */
+err1:
+	json_object_put(dests_obj);
 	json_object_put(obj);
-
-	return 0;
-err:
-	return -ENOMEM;
+	fclose(file);
+	return ret;
 }
 #else
 int sap_status_dump_json(struct sap_ctx *ctx, int fd)
