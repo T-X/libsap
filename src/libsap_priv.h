@@ -115,4 +115,6 @@ static inline uint16_t sap_get_rand_uint16(struct sap_ctx *ctx)
 	return res % (UINT16_MAX + 1);
 }
 
+void sap_sessions_free(struct sap_ctx_dest *ctx_dest);
+
 #endif /* __LIBSAP_PRIV_H__ */

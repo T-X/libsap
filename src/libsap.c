@@ -554,6 +554,22 @@ static void sap_sessions_timeout_list(struct sap_ctx_dest *ctx_dest,
 	}
 }
 
+static void sap_sessions_list_free(struct sap_ctx_dest *ctx_dest,
+				   struct hlist_head *sessions_list)
+{
+	struct sap_session_entry *session;
+	struct hlist_node *tmp;
+
+	hlist_for_each_entry_safe(session, tmp, sessions_list, node)
+		sap_session_del(ctx_dest, session, sessions_list);
+}
+
+void sap_sessions_free(struct sap_ctx_dest *ctx_dest)
+{
+	sap_sessions_list_free(ctx_dest, &ctx_dest->sessions_list);
+	sap_sessions_list_free(ctx_dest, &ctx_dest->ha_sessions_list);
+}
+
 static void sap_sessions_timeout(struct sap_ctx_dest *ctx_dest)
 {
 	struct timespec now;

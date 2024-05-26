@@ -960,6 +960,7 @@ err1:
 
 static void sap_free_ctx_dest(struct sap_ctx_dest *ctx_dest)
 {
+	sap_sessions_free(ctx_dest);
 	sap_init_ctx_dest_del_epoll(ctx_dest);
 	free(ctx_dest->message);
 	sap_free_socket(ctx_dest);
