@@ -279,7 +279,6 @@ out:
 
 * If "-p" is a pipe, keep it  open and update session if new SDP is received
   (use "\r\n\r\n" and/or "\0" as delimeters?)
-* compression / zlib support
 * authentication
 * encryption
 * shrink SAP terminate message size
