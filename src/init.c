@@ -15,6 +15,9 @@
 #ifdef HAVE_ZLIB
 	#include <zlib.h>
 #endif
+#ifdef HAVE_BLAKE2
+	#include <blake2.h>
+#endif
 
 #include <arpa/inet.h> // inet_ntop()
 
@@ -133,12 +136,45 @@ static int sap_init_del_epoll(int fd, struct sap_ctx *ctx)
 	return sap_init_mod_epoll(fd, ctx, &type, EPOLL_CTL_DEL);
 }
 
-static uint16_t sap_get_msg_id_hash(struct sap_ctx *ctx, uint16_t *msg_id_hash)
+static int sap_get_blake2_uint16(struct sap_ctx_dest *ctx_dest, uint16_t *msg_id_hash)
 {
-	if (!msg_id_hash)
-		return sap_get_rand_uint16(ctx);
-	else
-		return htons(*msg_id_hash);
+#ifdef HAVE_BLAKE2
+	/* Technically, by RFC, computing the hash over the payload, excluding
+	 * the SAP header would be sufficient. But let's use the full SAP packet
+	 * to maybe use it as a full packet checksum in the future?
+	 */
+	return blake2((uint8_t *)msg_id_hash, ctx_dest->message, NULL,
+		      sizeof(*msg_id_hash), ctx_dest->msg_len, 0);
+#else
+	return -ENOTSUP;
+#endif
+}
+
+static int sap_set_msg_id_hash(struct sap_ctx_dest *ctx_dest,
+			       const uint16_t *msg_id_hash_in,
+			       int rand_msg_id)
+{
+	struct sap_packet *packet = (struct sap_packet *)ctx_dest->message;
+	uint16_t msg_id_hash;
+	int ret = 0;
+
+	if (msg_id_hash_in) {
+		msg_id_hash = *msg_id_hash_in;
+		goto out;
+	}
+
+	if (rand_msg_id <= 0) {
+		ret = sap_get_blake2_uint16(ctx_dest, &msg_id_hash);
+		if (!ret)
+			goto out;
+		if (rand_msg_id < 0 || ret != -ENOTSUP)
+			return ret;
+	}
+
+	msg_id_hash = sap_get_rand_uint16(ctx_dest->ctx);
+out:
+	packet->msg_id_hash = htons(msg_id_hash);
+	return 0;
 }
 
 static int sap_init_epoll(struct sap_ctx *ctx)
@@ -775,16 +811,18 @@ static char *sap_push_payload(char *msg, const char *payload,
 static void sap_create_message(struct sap_ctx_dest *ctx_dest,
 			       const char *payload, size_t payload_len,
 			       const char *payload_type, int compressed,
-			       int msg_type, uint16_t msg_id_hash)
+			       int rand_msg_id, int msg_type,
+			       uint16_t *msg_id_hash)
 {
 	int sap_af = ctx_dest->orig_src.s.sa_family;
 	size_t len, orig_source_len = 0;
 	char *msg;
+	int ret;
 
 	struct sap_packet packet = {
 		.flags = sap_get_flags(sap_af, compressed, msg_type),
 		.auth_len = 0,
-		.msg_id_hash = msg_id_hash,
+		.msg_id_hash = 0,
 	};
 
 	switch (sap_af) {
@@ -805,8 +843,8 @@ static void sap_create_message(struct sap_ctx_dest *ctx_dest,
 		return;
 
 	ctx_dest->message = msg;
+	ctx_dest->msg_len = len;
 	memset(msg, 0, len);
-
 
 	memcpy(msg, &packet, sizeof(packet));
 	msg += sizeof(packet);
@@ -816,14 +854,15 @@ static void sap_create_message(struct sap_ctx_dest *ctx_dest,
 	msg = sap_push_payload_type(msg, payload_type, compressed);
 	msg = sap_push_payload(msg, payload, payload_len);
 
-	if (msg - ctx_dest->message != len) {
+	ret = sap_set_msg_id_hash(ctx_dest, msg_id_hash, rand_msg_id);
+
+	if (msg - ctx_dest->message != len || ret < 0) {
 		free(ctx_dest->message);
 		ctx_dest->message = NULL;
 		len = 0;
 		return;
 	}
 
-	ctx_dest->msg_len = len;
 	ctx_dest->total_msg_lens += len + sap_ipeth_hdrlen(&ctx_dest->dest);
 	ctx_dest->num_sessions++;
 	ctx_dest->num_ha_sessions++;
@@ -864,8 +903,8 @@ static void sap_init_ctx_dest_del_epoll(struct sap_ctx_dest *ctx_dest)
 static struct sap_ctx_dest *
 sap_init_ctx_dest(struct sap_ctx *ctx, char *dest, int pay_to_sap_dest,
 		  int dest_af, char *payload_type, char *payload,
-		  size_t payload_len, int compressed, int msg_type,
-		  uint16_t msg_id_hash, char *orig_src)
+		  size_t payload_len, int compressed, int rand_msg_id,
+		  int msg_type, uint16_t *msg_id_hash, char *orig_src)
 {
 	struct sap_ctx_dest *ctx_dest;
 	int ret;
@@ -897,7 +936,7 @@ sap_init_ctx_dest(struct sap_ctx *ctx, char *dest, int pay_to_sap_dest,
 		goto err3;
 
 	sap_create_message(ctx_dest, payload, payload_len, payload_type,
-			   compressed, msg_type, msg_id_hash);
+			   compressed, rand_msg_id, msg_type, msg_id_hash);
 	if (!ctx_dest->message)
 		goto err4;
 
@@ -943,8 +982,9 @@ static void sap_free_ctx_dests(struct sap_ctx *ctx)
 static int sap_init_ctx_dests(struct sap_ctx *ctx, char *dests[],
 			      int pay_to_sap_dest, int dest_af,
 			      char *payload_type, char *payload,
-			      size_t payload_len, int compressed, int msg_type,
-			      uint16_t msg_id, char *orig_src)
+			      size_t payload_len, int compressed,
+			      int rand_msg_id, int msg_type, uint16_t *msg_id,
+			      char *orig_src)
 {
 	struct sap_ctx_dest *ctx_dest;
 	char *dest;
@@ -956,8 +996,9 @@ static int sap_init_ctx_dests(struct sap_ctx *ctx, char *dests[],
 	for (i = 0, dest = dests[i]; dest; dest = dests[++i]) {
 		ctx_dest = sap_init_ctx_dest(ctx, dest, pay_to_sap_dest,
 					     dest_af, payload_type, payload,
-					     payload_len, compressed, msg_type,
-					     msg_id, orig_src);
+					     payload_len, compressed,
+					     rand_msg_id, msg_type, msg_id,
+					     orig_src);
 		if (!ctx_dest)
 			return -EINVAL;
 
@@ -977,6 +1018,7 @@ struct sap_ctx *sap_init_custom(
 	char *payload_filename,
 	char *payload_type,
 	int enable_compression,
+	int enable_rand_msg_id_hash,
 	int msg_type,
 	uint16_t *msg_id_hash,
 	char *orig_src,
@@ -990,7 +1032,6 @@ struct sap_ctx *sap_init_custom(
 	struct sap_ctx *ctx;
 	char *payload;
 	size_t payload_len;
-	uint16_t msg_id;
 	int ret;
 
 	ctx = malloc(sizeof(*ctx));
@@ -1034,8 +1075,6 @@ struct sap_ctx *sap_init_custom(
 		goto err2;
 	}
 
-	msg_id = sap_get_msg_id_hash(ctx, msg_id_hash);
-
 	ret = sap_init_epoll(ctx);
 	if (ret < 0) {
 		errno = -EPERM;
@@ -1069,7 +1108,8 @@ struct sap_ctx *sap_init_custom(
 
 	ret = sap_init_ctx_dests(ctx, sdp_dests, 1, dest_af, payload_type,
 				 payload, payload_len, enable_compression,
-				 msg_type, msg_id, orig_src);
+				 enable_rand_msg_id_hash, msg_type, msg_id_hash,
+				 orig_src);
 	if (ret < 0) {
 		errno = ret;
 		goto err6;
@@ -1077,7 +1117,8 @@ struct sap_ctx *sap_init_custom(
 
 	ret = sap_init_ctx_dests(ctx, payload_dests, 1, dest_af, payload_type,
 				 payload, payload_len, enable_compression,
-				 msg_type, msg_id, orig_src);
+				 enable_rand_msg_id_hash, msg_type, msg_id_hash,
+				 orig_src);
 	if (ret < 0) {
 		errno = ret;
 		goto err6;
@@ -1085,7 +1126,8 @@ struct sap_ctx *sap_init_custom(
 
 	ret = sap_init_ctx_dests(ctx, sap_dests, 0, dest_af, payload_type,
 				 payload, payload_len, enable_compression,
-				 msg_type, msg_id, orig_src);
+				 enable_rand_msg_id_hash, msg_type, msg_id_hash,
+				 orig_src);
 	if (ret < 0) {
 		errno = ret;
 		goto err6;
@@ -1123,14 +1165,14 @@ err1:
 struct sap_ctx *sap_init_fast(char *payload_filename)
 {
 	return sap_init_custom(NULL, NULL, 0, AF_UNSPEC, payload_filename, NULL,
-			       0, -1, NULL, NULL, 5, 0, 0, 0);
+			       0, 0, -1, NULL, NULL, 5, 0, 0, 0);
 }
 
 /* use this for fully RFC2974 compliant execution, e.g. for daemons */
 struct sap_ctx *sap_init(char *payload_filename)
 {
 	return sap_init_custom(NULL, NULL, 0, AF_UNSPEC, payload_filename, NULL,
-			       0, -1, NULL, NULL, 0, 0, 0, 0);
+			       0, 0, -1, NULL, NULL, 0, 0, 0, 0);
 }
 
 void sap_free(struct sap_ctx *ctx)

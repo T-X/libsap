@@ -51,6 +51,28 @@ AS_IF([test "x$with_json_c" != xno],
     ])
   ])
 
+AC_ARG_WITH([blake2],
+  [AS_HELP_STRING([--with-blake2],
+    [use blake2 for a deterministic SAP Message ID Hash @<:@default=check@:>@])],
+  [],
+  [with_blake2=check])
+
+BLAKE2=
+AS_IF([test "x$with_blake2" != xno],
+  [AC_CHECK_HEADERS([blake2.h],
+    [AC_CHECK_LIB([b2], [blake2b_init],
+      [AC_SUBST([BLAKE2], ["-lb2"])
+       AC_DEFINE([HAVE_BLAKE2], [1],
+                 [Define if you have blake2])
+      ],
+      [if test "x$with_blake2" != xcheck; then
+         AC_MSG_FAILURE(
+           [--with-blake2 was given, but test for blake2 failed])
+       fi
+      ], )
+    ])
+  ])
+
 AM_INIT_AUTOMAKE([1.11 subdir-objects -Wall -Werror])
 AM_PROG_AR
 LT_INIT
