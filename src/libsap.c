@@ -139,28 +139,49 @@ static void sap_set_msg_type(struct sap_ctx_dest *ctx_dest, int msg_type)
 		packet->flags &= ~SAP_FLAG_TYPE;
 }
 
-static int sap_is_my_source(struct sap_ctx_dest *ctx_dest,
-			    union sap_sockaddr_union *addr)
+static int sap_addr_cmp(const union sap_sockaddr_union *addr1,
+			const union sap_sockaddr_union *addr2)
 {
-	union sap_sockaddr_union *src = &ctx_dest->src;
+	int ret;
 
-	/* TODO: maybe check for our other SAP destinations, too? */
+	if (addr1->s.sa_family < addr2->s.sa_family)
+		return -1;
+	else if (addr1->s.sa_family > addr2->s.sa_family)
+		return 1;
 
-	if (src->s.sa_family != addr->s.sa_family)
-		return 0;
-
-	switch (src->s.sa_family) {
+	switch (addr1->s.sa_family) {
 	case AF_INET:
-		return !memcmp(&src->in.sin_addr,
-			       &addr->in.sin_addr,
-			       sizeof(src->in.sin_addr));
+		ret = memcmp(&addr1->in.sin_addr, &addr2->in.sin_addr,
+			     sizeof(addr1->in.sin_addr));
+		break;
 	case AF_INET6:
-		return !memcmp(&src->in6.sin6_addr,
-			       &addr->in6.sin6_addr,
-			       sizeof(src->in6.sin6_addr));
+		ret = memcmp(&addr1->in6.sin6_addr, &addr2->in6.sin6_addr,
+			     sizeof(addr1->in6.sin6_addr));
+		break;
+	default:
+		ret = 0;
 	}
 
+	if (ret < 0)
+		return -1;
+	else if (ret > 0)
+		return 1;
+
 	return 0;
+}
+
+static int sap_is_my_source(const struct sap_ctx_dest *ctx_dest,
+			    const union sap_sockaddr_union *addr)
+{
+	/* TODO: maybe check for our other SAP destinations, too? */
+	return !sap_addr_cmp(&ctx_dest->src, addr);
+}
+
+static int sap_is_my_orig_source(const struct sap_ctx_dest *ctx_dest,
+				 const union sap_sockaddr_union *addr)
+{
+	/* TODO: maybe check for our other SAP destinations, too? */
+	return !sap_addr_cmp(&ctx_dest->orig_src, addr);
 }
 
 static int sap_get_orig_source(char *buffer, int buf_len,
@@ -208,22 +229,17 @@ static int sap_is_zero_address(union sap_sockaddr_union *addr)
 }
 
 static int sap_session_cmp(struct sap_session_entry *session,
-			   union sap_sockaddr_union *orig_src,
+			   const union sap_sockaddr_union *orig_src,
 			   uint16_t msg_id_hash)
 {
 	int ret;
 
-	if (session->orig_src.s.sa_family < orig_src->s.sa_family)
-		return -1;
-	else if (session->orig_src.s.sa_family > orig_src->s.sa_family)
-		return 1;
-
-	ret = memcmp(&session->orig_src, orig_src, sizeof(*orig_src));
+	ret = sap_addr_cmp(&session->orig_src, orig_src);
 	if (ret < 0)
 		return -1;
 	else if (ret > 0)
 		return 1;
-	
+
 	if (session->msg_id_hash < msg_id_hash)
 		return -1;
 	else if (session->msg_id_hash > msg_id_hash)
@@ -403,11 +419,11 @@ static int sap_epoll_rx_handler(struct sap_ctx_dest *ctx_dest)
 
 	/* ignore our own packets */
 	if (sap_is_my_source(ctx_dest, &src) &&
-	    sap_is_my_source(ctx_dest, &orig_src) &&
+	    sap_is_my_orig_source(ctx_dest, &orig_src) &&
 	    packet->msg_id_hash == my_packet->msg_id_hash)
 		goto out;
 
-	if (sap_is_my_source(ctx_dest, &orig_src) &&
+	if (sap_is_my_orig_source(ctx_dest, &orig_src) &&
 	    packet->msg_id_hash == my_packet->msg_id_hash)
 		/* TODO: should be a high-availability, redundant sender,
 		 * we should scale back our transmissions accordingly

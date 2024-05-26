@@ -86,6 +86,7 @@ struct sap_ctx_dest {
 	int timer_fd;
 	union sap_sockaddr_union dest;
 	union sap_sockaddr_union src;
+	union sap_sockaddr_union orig_src;
 	char *message;
 	size_t msg_len;
 	struct hlist_node node;

@@ -583,6 +583,8 @@ static int sap_create_socket_tx(struct sap_ctx_dest *ctx_dest)
 	if (ret < 0)
 		goto err;
 
+	ctx_dest->orig_src = ctx_dest->src;
+
 	ret = sap_set_hop_limit(sd, sap_dst);
 	if (ret < 0)
 		goto err;
