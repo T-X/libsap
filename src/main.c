@@ -67,6 +67,7 @@ static void usage(char *prog)
 	printf("    -t <type>                           Payload type (default: \"application/sdp\")\n");
 	printf("    -T <announce|terminate>             Message type, sets debug mode (default: standard/daemon mode)\n");
 	printf("    -I <msg-id-hash>                    Message ID hash (default: random)\n");
+	printf("    -O <ipv4-address|ipv6-address>      Orig source (default: from IP source address)\n");
 	printf("    -i <interval>                       Interval override in seconds (default: 300)\n");
 	printf("    -J                                  Disable interval jitter\n");
 	printf("    -c <count>                          Number of messages to send\n");
@@ -75,7 +76,7 @@ static void usage(char *prog)
 //	printf("    -m <bytes>                          Packet MTU (default: min(1000, iface-MTU))\n");
 }
 
-char *getopt_args_fmt = "46d:S:Dp:t:T:I:i:Jc:b:Cm:h";
+char *getopt_args_fmt = "46d:S:Dp:t:T:I:O:i:Jc:b:Cm:h";
 
 static unsigned int get_num_dests(int argc, char *argv[], char type)
 {
@@ -105,6 +106,7 @@ static void get_args(int argc,
 		     int *enable_compression,
 		     int *msg_type,
 		     uint16_t **msg_id_hash,
+		     char **orig_src,
 		     unsigned int *interval,
 		     int *no_jitter,
 		     unsigned long *count,
@@ -112,6 +114,7 @@ static void get_args(int argc,
 {
 	int msg_id_hash_found = 0;
 	int payload_dests_idx = 0;
+	int orig_src_found = 0;
 	int sap_dests_idx = 0;
 	int opt, ret;
 
@@ -199,6 +202,10 @@ static void get_args(int argc,
 			}
 			msg_id_hash_found = 1;
 			break;
+		case 'O':
+			*orig_src = optarg;
+			orig_src_found = 1;
+			break;
 		case 'J':
 			*no_jitter = 1;
 			break;
@@ -253,6 +260,8 @@ static void get_args(int argc,
 
 	if (!msg_id_hash_found)
 		*msg_id_hash = NULL;
+	if (!orig_src_found)
+		*orig_src = NULL;
 }
 
 int main(int argc, char *argv[])
@@ -269,6 +278,7 @@ int main(int argc, char *argv[])
 	int msg_type = -1;
 	uint16_t msg_id_hash_store;
 	uint16_t *msg_id_hash = &msg_id_hash_store;
+	char *orig_src = NULL;
 	unsigned int interval = 0;
 	int no_jitter = 0;
 	unsigned long count = 0;
@@ -278,13 +288,13 @@ int main(int argc, char *argv[])
 	get_args(argc, argv, &addr_family, &payload_dests, num_payload_dests,
 		 &sap_dests, num_sap_dests, &disable_dests_from_sdp,
 		 &payload_filename, &payload_type, &enable_compression,
-		 &msg_type, &msg_id_hash, &interval, &no_jitter, &count,
-		 &bw_limit);
+		 &msg_type, &msg_id_hash, &orig_src, &interval, &no_jitter,
+		 &count, &bw_limit);
 
 	ctx = sap_init_custom(payload_dests, sap_dests, disable_dests_from_sdp,
 			      addr_family, payload_filename, payload_type,
 			      enable_compression, msg_type, msg_id_hash,
-			      interval, no_jitter, count, bw_limit);
+			      orig_src, interval, no_jitter, count, bw_limit);
 	if (!ctx) {
 		usage(argv[0]);
 		exit(1);
