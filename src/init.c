@@ -1051,6 +1051,7 @@ struct sap_ctx *sap_init_custom(
 	ctx->count_max = count;
 	ctx->term = 0;
 	ctx->epoll_ctx_none = SAP_EPOLL_CTX_TYPE_NONE;
+	ctx->epoll.nonblocking = 0;
 	ctx->thread.tid = NULL;
 	ctx->thread.tid_store = 0;
 

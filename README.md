@@ -242,6 +242,9 @@ struct sap_ctx *sap_init_custom(char *payload_dests[],
 struct sap_ctx *sap_init_fast(char *payload_filename);
 struct sap_ctx *sap_init(char *payload_filename);
 
+void sap_set_nonblocking(struct sap_ctx *ctx, int on);
+int sap_get_pollfd(struct sap_ctx *ctx);
+
 int sap_run(struct sap_ctx *ctx);
 int sap_start(struct sap_ctx *ctx);
 void sap_stop(struct sap_ctx *ctx);
@@ -321,6 +324,82 @@ out:
 }
 ```
 
+### libsap example, single-threaded, non-blocking
+
+```C
+#include <string.h>
+#include <sys/epoll.h>
+#include <unistd.h>
+#include <libsap.h>
+
+static void my_event_add_sap(int epoll_fd, struct sap_ctx *ctx)
+{
+    struct epoll_event event;
+    int fd;
+
+    memset(&event, 0, sizeof(event));
+    event.events = EPOLLIN;
+    event.data.ptr = ctx;
+
+    fd = sap_get_pollfd(ctx);
+    epoll_ctl(epoll_fd, EPOLL_CTL_ADD, fd, &event);
+}
+
+static void my_event_loop(struct sap_ctx *ctx)
+{
+    int max_events = 10;
+    struct epoll_event events[max_events];
+    int nfds, epoll_fd;
+
+    epoll_fd = epoll_create1(0);
+    if (epoll_fd < 0)
+        return;
+
+    my_event_add_sap(epoll_fd, ctx);
+    /* add your events/work as descriptors here, too */
+
+    /* event loop */
+    while (1) {
+        nfds = epoll_wait(epoll_fd, events, max_events, -1);
+        if (nfds == -1)
+            break;
+
+        for (int n = 0; n < nfds; ++n) {
+            if (events[n].data.ptr == ctx)
+                /* run SAP work */
+                sap_run(events[n].data.ptr);
+        }
+    }
+
+    close(epoll_fd);
+    return;
+}
+
+int main(int argc, char *argv[])
+{
+    struct sap_ctx *ctx;
+
+    /* initialize SAP context with our settings;
+     * sap_init_fast() uses a (not quite RFC conformant,
+     * but more responsive) 5 instead of 300 seconds
+     * interval
+     */
+    ctx = sap_init_fast("/tmp/my-multimedia-session.sdp");
+    if (!ctx)
+        return 1;
+
+    /* set single-threaded, non-blocking mode */
+    sap_set_nonblocking(ctx, 1);
+
+    /* do your stuff here, while checking for SAP work */
+    my_event_loop(ctx);
+
+    /* cleanup allocated SAP context */
+    sap_free(ctx);
+    return 0;
+}
+```
+
 ## TODOs
 
 * If "-p" is a pipe, keep it  open and update session if new SDP is received
@@ -338,9 +417,6 @@ out:
 * add getopt\_long() / long option names to sap tool
 * add a `payload_fd` option as an alternative to `payload_filename` to
   `sap_init_custom()`?
-* add a `sap_run_noblock()` variant, together with an `sap_pollfd()`
-  which can be checked for work/updates on our internal epoll fd?
-  and which can be called again / continued?
 * add a `sap_run_wait(ctx, timeout_msec)` variant which returns after
   timeout\_msec milliseconds, and which can be called again / continued?
 * implement SAP client side:

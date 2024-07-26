@@ -54,6 +54,9 @@ struct sap_ctx *sap_init_custom(char *payload_dests[],
 struct sap_ctx *sap_init_fast(char *payload_filename);
 struct sap_ctx *sap_init(char *payload_filename);
 
+void sap_set_nonblocking(struct sap_ctx *ctx, int on);
+int sap_get_pollfd(struct sap_ctx *ctx);
+
 int sap_run(struct sap_ctx *ctx);
 int sap_start(struct sap_ctx *ctx);
 void sap_stop(struct sap_ctx *ctx);

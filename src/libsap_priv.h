@@ -62,6 +62,7 @@ struct sap_ctx {
 		struct epoll_event events[SAP_EPOLL_MAX_EVENTS];
 		int epoll_fd;
 		struct timespec epoll_timeout;
+		int nonblocking;
 	} epoll;
 	struct {
 		thrd_t *tid;
