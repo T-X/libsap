@@ -75,15 +75,16 @@ AS_IF([test "x$with_blake2" != xno],
 
 AC_ARG_WITH([uv],
   [AS_HELP_STRING([--with-uv],
-    [use blake2 for a deterministic SAP Message ID Hash @<:@default=check@:>@])],
+    [use libuv for a portable build @<:@default=check@:>@])],
   [],
   [with_uv=check])
 
 UV=
-AS_IF([test "x$with_uv2" != xno],
+AS_IF([test "x$with_uv" != xno],
   [AC_CHECK_HEADERS([uv.h],
     [AC_CHECK_LIB([uv], [uv_default_loop],
-      [AC_SUBST([UV], ["-luv"])
+      # no-strict-aliasing with libuv, like its docs recommends
+      [AC_SUBST([UV], ["-luv -fno-strict-aliasing"])
        AC_DEFINE([HAVE_UV], [1],
                  [Define if you have UV])
       ],

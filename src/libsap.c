@@ -15,7 +15,6 @@
 #include <stdio.h>
 #include <stddef.h>
 #include <string.h>
-#include <sys/epoll.h>
 #include <sys/signalfd.h>
 #include <sys/socket.h>
 #include <sys/timerfd.h>
@@ -23,7 +22,11 @@
 #include <threads.h>
 #include <time.h>
 #include <unistd.h>
-#include <uv.h>
+#ifdef HAVE_UV
+	#include <uv.h>
+#else
+	#include <sys/epoll.h>
+#endif
 
 #include <arpa/inet.h> // inet_ntop()
 
@@ -603,7 +606,10 @@ static int sap_count_reached(struct sap_ctx *ctx)
 
 static int sap_epoll_term_handler(struct sap_ctx *ctx)
 {
+#ifdef HAVE_UV
 	uv_stop(ctx->epoll.uv_loop);
+#endif
+	return 0;
 }
 
 static int sap_epoll_tx_handler(struct sap_ctx_dest *ctx_dest)
@@ -666,8 +672,7 @@ static int sap_poll_event_handler(enum sap_epoll_ctx_type *type)
 	case SAP_EPOLL_CTX_TYPE_TERM:
 		ctx = sap_container_of(type, struct sap_ctx,
 				       epoll_ctx_term);
-		sap_epoll_term_handler(ctx);
-		return 0;
+		return sap_epoll_term_handler(ctx);
 	case SAP_EPOLL_CTX_TYPE_RX:
 		ctx_dest = sap_container_of(type, struct sap_ctx_dest,
 					    epoll_ctx_rx);
@@ -682,19 +687,21 @@ static int sap_poll_event_handler(enum sap_epoll_ctx_type *type)
 	return -EINVAL;
 }
 
-static int sap_epoll_event_handler(struct epoll_event *event)
-{
-//	enum sap_epoll_ctx_type *type = event->data.ptr;
-//	       	= event->data.ptr;
-	return sap_poll_event_handler(event->data.ptr);
-}
-
+#ifdef HAVE_UV
 void sap_uv_event_handler(uv_poll_t *req, int status, int events)
 {
 	printf("~~~ %s:%i: start, &req/handle: %p, type: %p\n", __func__, __LINE__, req, req->data);
 //	sleep(1);
 	sap_poll_event_handler((enum sap_epoll_ctx_type *)req->data);
 }
+#else
+static int sap_epoll_event_handler(struct epoll_event *event)
+{
+//	enum sap_epoll_ctx_type *type = event->data.ptr;
+//	       	= event->data.ptr;
+	return sap_poll_event_handler(event->data.ptr);
+}
+#endif
 
 static int sap_terminate_dest(struct sap_ctx_dest *ctx_dest)
 {
@@ -715,12 +722,14 @@ static void sap_terminate_all(struct sap_ctx *ctx)
 		sap_terminate_dest(ctx_dest);
 }
 
+#ifndef HAVE_UV
 static void sap_epoll_wait(struct sap_ctx *ctx, int nonblocking)
 {
 	int ev_count, ret;
 
+	printf("~~~ %s:%i: nonblocking: %i\n", __func__, __LINE__, nonblocking);
 	ev_count = epoll_wait(ctx->epoll.epoll_fd, ctx->epoll.events,
-			      SAP_EPOLL_MAX_EVENTS, nonblocking ? -1 : 0);
+			      SAP_EPOLL_MAX_EVENTS, nonblocking ? 0 : -1);
 
 	for(int i = 0; i < ev_count; i++) {
 		ret = sap_epoll_event_handler(&ctx->epoll.events[i]);
@@ -728,16 +737,16 @@ static void sap_epoll_wait(struct sap_ctx *ctx, int nonblocking)
 			return;
 	}
 }
-
-static void sap_uv_wait(struct sap_ctx *ctx, int nonblocking)
-{
-	printf("~~~ %s:%i: nonblocking: %i\n", __func__, __LINE__, nonblocking);
-	uv_run(ctx->epoll.uv_loop, nonblocking ? UV_RUN_NOWAIT : UV_RUN_DEFAULT);
-}
+#endif
 
 static void sap_poll_loop(struct sap_ctx *ctx, int nonblocking)
 {
-	sap_uv_wait(ctx, nonblocking);
+#ifdef HAVE_UV
+	printf("~~~ %s:%i: nonblocking: %i, calling uv_run()\n", __func__, __LINE__, nonblocking);
+	uv_run(ctx->epoll.uv_loop, nonblocking ? UV_RUN_NOWAIT : UV_RUN_DEFAULT);
+#else
+	sap_epoll_wait(ctx, nonblocking);
+#endif
 }
 
 int sap_run(struct sap_ctx *ctx)
@@ -807,8 +816,11 @@ void sap_set_nonblocking(struct sap_ctx *ctx, int on)
 
 int sap_get_pollfd(struct sap_ctx *ctx)
 {
+#ifdef HAVE_UV
 	return uv_backend_fd(ctx->epoll.uv_loop);
-//	return ctx->epoll.epoll_fd;
+#else
+	return ctx->epoll.epoll_fd;
+#endif
 }
 
 static int sap_run_thread(void *arg)

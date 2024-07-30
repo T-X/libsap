@@ -3,7 +3,7 @@
 
 #include <config.h>
 
-#include <arpa/inet.h>
+//#include <arpa/inet.h>
 #include <errno.h>
 #include <limits.h>
 #include <signal.h>
@@ -11,7 +11,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/epoll.h>
+#ifndef HAVE_UV
+	#include <sys/epoll.h>
+#endif
 #include <sys/socket.h>
 #include <unistd.h>
 
@@ -296,6 +298,7 @@ static void free_args(char **payload_dests, char **sap_dests)
 	free(sap_dests);
 }
 
+#ifndef HAVE_UV
 static int my_event_handler(struct sap_ctx *ctx)
 {
 	int max_events = 10;
@@ -340,6 +343,7 @@ err1:
 	fprintf(stderr, "Error: can't create epoll_fd\n");
 	return -EINVAL;
 }
+#endif
 
 int main(int argc, char *argv[])
 {

@@ -12,13 +12,18 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/timerfd.h>
+
 #ifdef HAVE_ZLIB
 	#include <zlib.h>
 #endif
 #ifdef HAVE_BLAKE2
 	#include <blake2.h>
 #endif
-#include <uv.h>
+#ifdef HAVE_UV
+	#include <uv.h>
+#else
+	#include <sys/epoll.h>
+#endif
 
 #include <arpa/inet.h> // inet_ntop()
 
@@ -112,31 +117,7 @@ static int sap_init_random(struct sap_ctx *sap_ctx)
 	return 0;
 }
 
-static int sap_init_mod_epoll(int fd, struct sap_ctx *ctx,
-			      enum sap_epoll_ctx_type *type, int op)
-{
-	struct epoll_event event;
-
-	memset(&event, 0, sizeof(event));
-	event.events = EPOLLIN;
-	event.data.ptr = type;
-
-	return epoll_ctl(ctx->epoll.epoll_fd, EPOLL_CTL_ADD, fd, &event);
-}
-
-static int sap_init_add_epoll(int fd, struct sap_ctx *ctx,
-			      enum sap_epoll_ctx_type *type)
-{
-	return sap_init_mod_epoll(fd, ctx, type, EPOLL_CTL_ADD);
-}
-
-static int sap_init_del_epoll(int fd, struct sap_ctx *ctx)
-{
-	enum sap_epoll_ctx_type type = SAP_EPOLL_CTX_TYPE_NONE;
-
-	return sap_init_mod_epoll(fd, ctx, &type, EPOLL_CTL_DEL);
-}
-
+#ifdef HAVE_UV
 static int sap_init_add_uv(int fd, struct sap_ctx *ctx,
 			   enum sap_epoll_ctx_type *type)
 {
@@ -154,7 +135,7 @@ static int sap_init_add_uv(int fd, struct sap_ctx *ctx,
 //			return 0;
 //		}
 	printf("~~~ %s:%i: for pipefd wakeup\n", __func__, __LINE__);
-		handle = &ctx->thread.poll_handle_pipefd;
+		handle = &ctx->epoll.poll_handle_pipefd;
 		break;
 	case SAP_EPOLL_CTX_TYPE_RX:
 	printf("~~~ %s:%i: for sd_rx\n", __func__, __LINE__);
@@ -187,16 +168,50 @@ static int sap_init_del_uv(int fd, struct sap_ctx *ctx)
 {
 	return 0;
 }
+#else
+static int sap_init_mod_epoll(int fd, struct sap_ctx *ctx,
+			      enum sap_epoll_ctx_type *type, int op)
+{
+	struct epoll_event event;
+
+	memset(&event, 0, sizeof(event));
+	event.events = EPOLLIN;
+	event.data.ptr = type;
+
+	return epoll_ctl(ctx->epoll.epoll_fd, EPOLL_CTL_ADD, fd, &event);
+}
+
+static int sap_init_add_epoll(int fd, struct sap_ctx *ctx,
+			      enum sap_epoll_ctx_type *type)
+{
+	return sap_init_mod_epoll(fd, ctx, type, EPOLL_CTL_ADD);
+}
+
+static int sap_init_del_epoll(int fd, struct sap_ctx *ctx)
+{
+	enum sap_epoll_ctx_type type = SAP_EPOLL_CTX_TYPE_NONE;
+
+	return sap_init_mod_epoll(fd, ctx, &type, EPOLL_CTL_DEL);
+}
+#endif /* HAVE_UV */
 
 static int sap_init_add_poll(int fd, struct sap_ctx *ctx,
 			     enum sap_epoll_ctx_type *type)
 {
+#ifdef HAVE_UV
 	return sap_init_add_uv(fd, ctx, type);
+#else
+	return sap_init_add_epoll(fd, ctx, type);
+#endif
 }
 
 static int sap_init_del_poll(int fd, struct sap_ctx *ctx)
 {
+#ifdef HAVE_UV
 	return sap_init_del_uv(fd, ctx);
+#else
+	return sap_init_del_epoll(fd, ctx);
+#endif
 }
 
 static int sap_get_blake2_uint16(struct sap_ctx_dest *ctx_dest, uint16_t *msg_id_hash)
@@ -240,18 +255,38 @@ out:
 	return 0;
 }
 
+#ifdef HAVE_UV
+static int sap_init_uv(struct sap_ctx *ctx)
+{
+	ctx->epoll.uv_loop = uv_default_loop();
+}
+#else
 static int sap_init_epoll(struct sap_ctx *ctx)
 {
-	int ret = -EINVAL;
-
 	ctx->epoll.epoll_fd = epoll_create1(0);
 	if (ctx->epoll.epoll_fd < 0)
-		goto err1;
+		return -ENOMEM;
+
+	return 0;
+}
+#endif
+
+static int sap_init_poll(struct sap_ctx *ctx)
+{
+#ifdef HAVE_UV
+	return sap_init_uv(ctx);
+#else
+	return sap_init_epoll(ctx);
+#endif
+}
+
+static int sap_init_poll_term(struct sap_ctx *ctx)
+{
+	int ret;
 
 	ret = pipe(ctx->thread.pipefd);
-	if (ret < 0) {
-		goto err2;
-	}
+	if (ret < 0)
+		return ret;
 
 	/* epoll: no action needed, only to wake up epoll_wait()
 	 * to check ctx->term
@@ -259,15 +294,12 @@ static int sap_init_epoll(struct sap_ctx *ctx)
 	ret = sap_init_add_poll(ctx->thread.pipefd[0], ctx,
 				 &ctx->epoll_ctx_term);
 	if (ret < 0)
-		goto err3;
+		goto err;
 
 	return 0;
-err3:
+err:
 	close(ctx->thread.pipefd[0]);
 	close(ctx->thread.pipefd[1]);
-err2:
-	close(ctx->epoll.epoll_fd);
-err1:
 	return ret;
 }
 
@@ -960,9 +992,11 @@ static int sap_init_ctx_dest_add_epoll(struct sap_ctx_dest *ctx_dest)
 
 static void sap_init_ctx_dest_del_epoll(struct sap_ctx_dest *ctx_dest)
 {
+#ifndef HAVE_UV
 	sap_init_del_epoll(ctx_dest->timer_fd, ctx_dest->ctx);
 	sap_init_del_epoll(ctx_dest->sd_rx, ctx_dest->ctx);
 	sap_init_del_epoll(ctx_dest->sd_tx, ctx_dest->ctx);
+#endif
 }
 
 static struct sap_ctx_dest *
@@ -1119,7 +1153,6 @@ struct sap_ctx *sap_init_custom(
 	ctx->epoll_ctx_none = SAP_EPOLL_CTX_TYPE_NONE;
 	ctx->epoll_ctx_term = SAP_EPOLL_CTX_TYPE_TERM;
 	ctx->epoll.nonblocking = 0;
-	ctx->epoll.uv_loop = uv_default_loop();
 	ctx->thread.tid = NULL;
 	ctx->thread.tid_store = 0;
 
@@ -1146,11 +1179,19 @@ struct sap_ctx *sap_init_custom(
 		goto err2;
 	}
 
-	ret = sap_init_epoll(ctx);
+	ret = sap_init_poll(ctx);
 	if (ret < 0) {
 		errno = -EPERM;
 		goto err2;
 	}
+
+	ret = sap_init_poll_term(ctx);
+	if (ret < 0) {
+		errno = -EPERM;
+		goto err2;
+	}
+
+	/* TODO: fix error case cleanup */
 
 	payload = sap_get_payload(payload_filename, &payload_len);
 	if (!payload) {
