@@ -26,6 +26,9 @@
 
 #define SAP_INTERVAL_SEC 300
 
+#define sap_container_of(ptr, type, member) \
+		((type *)((char *)(ptr) - offsetof(type, member)))
+
 struct sap_packet {
 	uint8_t flags;
 	uint8_t auth_len;
@@ -39,6 +42,7 @@ enum sap_msg_type {
 
 enum sap_epoll_ctx_type {
 	SAP_EPOLL_CTX_TYPE_NONE = 0,
+	SAP_EPOLL_CTX_TYPE_TERM,
 	SAP_EPOLL_CTX_TYPE_RX,
 	SAP_EPOLL_CTX_TYPE_TX,
 };
@@ -54,6 +58,7 @@ struct sap_ctx {
 	unsigned long bw_limit;
 	int term;
 	enum sap_epoll_ctx_type epoll_ctx_none;
+	enum sap_epoll_ctx_type epoll_ctx_term;
 	struct {
 		struct random_data rd;
 		char rs[256];
@@ -63,12 +68,14 @@ struct sap_ctx {
 		int epoll_fd;
 		struct timespec epoll_timeout;
 		int nonblocking;
+		uv_loop_t *uv_loop;
 	} epoll;
 	struct {
 		thrd_t *tid;
 		thrd_t tid_store;
 		mtx_t ctrl_lock;
 		int pipefd[2];
+		uv_poll_t poll_handle_pipefd;
 	} thread;
 };
 
@@ -79,6 +86,11 @@ struct sap_ctx_dest {
 	int sd_tx;
 	int sd_rx;
 	int timer_fd;
+	struct {
+		uv_poll_t poll_handle_tx;
+		uv_poll_t poll_handle_rx;
+		uv_poll_t poll_handle_timer;
+	} uv;
 	union sap_sockaddr_union dest;
 	union sap_sockaddr_union src;
 	union sap_sockaddr_union orig_src;
@@ -117,5 +129,7 @@ static inline uint16_t sap_get_rand_uint16(struct sap_ctx *ctx)
 }
 
 void sap_sessions_free(struct sap_ctx_dest *ctx_dest);
+
+void sap_uv_event_handler(uv_poll_t *req, int status, int events);
 
 #endif /* __LIBSAP_PRIV_H__ */

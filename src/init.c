@@ -18,6 +18,7 @@
 #ifdef HAVE_BLAKE2
 	#include <blake2.h>
 #endif
+#include <uv.h>
 
 #include <arpa/inet.h> // inet_ntop()
 
@@ -136,6 +137,68 @@ static int sap_init_del_epoll(int fd, struct sap_ctx *ctx)
 	return sap_init_mod_epoll(fd, ctx, &type, EPOLL_CTL_DEL);
 }
 
+static int sap_init_add_uv(int fd, struct sap_ctx *ctx,
+			   enum sap_epoll_ctx_type *type)
+{
+	struct sap_ctx_dest *ctx_dest;
+	uv_poll_t *handle;
+
+	printf("~~~ %s:%i: start\n", __func__, __LINE__);
+
+	switch (*type) {
+	case SAP_EPOLL_CTX_TYPE_NONE:
+		return 0;
+	case SAP_EPOLL_CTX_TYPE_TERM:
+//		if (fd != ctx->thread.pipefd[0]) {
+//	printf("~~~ %s:%i: for sd_tx, ignore\n", __func__, __LINE__);
+//			return 0;
+//		}
+	printf("~~~ %s:%i: for pipefd wakeup\n", __func__, __LINE__);
+		handle = &ctx->thread.poll_handle_pipefd;
+		break;
+	case SAP_EPOLL_CTX_TYPE_RX:
+	printf("~~~ %s:%i: for sd_rx\n", __func__, __LINE__);
+		ctx_dest = sap_container_of(type, struct sap_ctx_dest,
+					    epoll_ctx_rx);
+		handle = &ctx_dest->uv.poll_handle_rx;
+		break;
+	case SAP_EPOLL_CTX_TYPE_TX:
+	printf("~~~ %s:%i: for timerfd\n", __func__, __LINE__);
+		ctx_dest = sap_container_of(type, struct sap_ctx_dest,
+					    epoll_ctx_tx);
+		handle = &ctx_dest->uv.poll_handle_tx;
+		break;
+	}
+
+//	int r = uv_poll_init(loop, &context->poll_handle, sockfd);
+//	assert(r == 0);
+//	context->poll_handle.data = context;
+//	uv_poll_start(&curl_context->poll_handle, UV_READABLE, curl_perform);
+//	handle->data = ctx_dest;
+	handle->data = type;
+	printf("~~~ %s:%i: here, &req/handle: %p, &type: %p\n", __func__, __LINE__, handle, type);
+	uv_poll_init(ctx->epoll.uv_loop, handle, fd);
+	uv_poll_start(handle, UV_READABLE, sap_uv_event_handler);
+	printf("~~~ %s:%i: end\n", __func__, __LINE__);
+	return 0;
+}
+
+static int sap_init_del_uv(int fd, struct sap_ctx *ctx)
+{
+	return 0;
+}
+
+static int sap_init_add_poll(int fd, struct sap_ctx *ctx,
+			     enum sap_epoll_ctx_type *type)
+{
+	return sap_init_add_uv(fd, ctx, type);
+}
+
+static int sap_init_del_poll(int fd, struct sap_ctx *ctx)
+{
+	return sap_init_del_uv(fd, ctx);
+}
+
 static int sap_get_blake2_uint16(struct sap_ctx_dest *ctx_dest, uint16_t *msg_id_hash)
 {
 #ifdef HAVE_BLAKE2
@@ -190,9 +253,11 @@ static int sap_init_epoll(struct sap_ctx *ctx)
 		goto err2;
 	}
 
-	/* no action needed, only to wake up epoll_wait() to check ctx->term */
-	ret = sap_init_add_epoll(ctx->thread.pipefd[0], ctx,
-				 &ctx->epoll_ctx_none);
+	/* epoll: no action needed, only to wake up epoll_wait()
+	 * to check ctx->term
+	 * uv: will also need to actively terminate */
+	ret = sap_init_add_poll(ctx->thread.pipefd[0], ctx,
+				 &ctx->epoll_ctx_term);
 	if (ret < 0)
 		goto err3;
 
@@ -873,19 +938,19 @@ static int sap_init_ctx_dest_add_epoll(struct sap_ctx_dest *ctx_dest)
 	int ret;
 
 	/* unused / should not receive anything */
-	ret = sap_init_add_epoll(ctx_dest->sd_tx, ctx_dest->ctx,
-				 &ctx_dest->ctx->epoll_ctx_none);
-	if (ret < 0)
-		return ret;
+//	ret = sap_init_add_poll(ctx_dest->sd_tx, ctx_dest->ctx,
+//				 &ctx_dest->ctx->epoll_ctx_none);
+//	if (ret < 0)
+//		return ret;
 
 	/* SAP packet reception */
-	ret = sap_init_add_epoll(ctx_dest->sd_rx, ctx_dest->ctx,
+	ret = sap_init_add_poll(ctx_dest->sd_rx, ctx_dest->ctx,
 				 &ctx_dest->epoll_ctx_rx);
 	if (ret < 0)
 		return ret;
 
 	/* wake-up timer for SAP packet transmission */
-	ret = sap_init_add_epoll(ctx_dest->timer_fd, ctx_dest->ctx,
+	ret = sap_init_add_poll(ctx_dest->timer_fd, ctx_dest->ctx,
 				 &ctx_dest->epoll_ctx_tx);
 	if (ret < 0)
 		return ret;
@@ -926,6 +991,7 @@ sap_init_ctx_dest(struct sap_ctx *ctx, char *dest, int pay_to_sap_dest,
 	if (mtx_init(&ctx_dest->sessions_lock, mtx_plain) == thrd_error)
 		goto err1;
 
+//	ctx_dest->timer_fd = timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK);
 	ctx_dest->timer_fd = timerfd_create(CLOCK_MONOTONIC, O_NONBLOCK);
 	if (ctx_dest->timer_fd < 0)
 		goto err2;
@@ -1051,9 +1117,12 @@ struct sap_ctx *sap_init_custom(
 	ctx->count_max = count;
 	ctx->term = 0;
 	ctx->epoll_ctx_none = SAP_EPOLL_CTX_TYPE_NONE;
+	ctx->epoll_ctx_term = SAP_EPOLL_CTX_TYPE_TERM;
 	ctx->epoll.nonblocking = 0;
+	ctx->epoll.uv_loop = uv_default_loop();
 	ctx->thread.tid = NULL;
 	ctx->thread.tid_store = 0;
+
 
 	/* disabled limit */
 	if (bw_limit < 0)

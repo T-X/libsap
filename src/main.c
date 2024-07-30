@@ -11,6 +11,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/epoll.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
@@ -21,6 +22,7 @@ static struct sap_ctx *p_sap_ctx = NULL;
 
 void signal_handler_shutdown(int signum)
 {
+	printf("~~~ %s:%i: start\n", __func__, __LINE__);
 	sap_term(p_sap_ctx);
 }
 
@@ -294,6 +296,51 @@ static void free_args(char **payload_dests, char **sap_dests)
 	free(sap_dests);
 }
 
+static int my_event_handler(struct sap_ctx *ctx)
+{
+	int max_events = 10;
+	struct epoll_event event, events[max_events];
+	int nfds, fd, epoll_fd;
+	int ret = 0;
+       
+//	printf("~~~ start\n");
+	epoll_fd = epoll_create1(0);
+	if (epoll_fd < 0)
+		goto err1;
+
+	memset(&event, 0, sizeof(event));
+	event.events = EPOLLIN;
+	event.data.ptr = ctx;
+
+	fd = sap_get_pollfd(ctx);
+	epoll_ctl(epoll_fd, EPOLL_CTL_ADD, fd, &event);
+
+//	printf("~~~ here1\n");
+	while (1) {
+		nfds = epoll_wait(epoll_fd, events, max_events, -1);
+		if (nfds == -1) {
+//			perror("epoll_wait");
+			ret = -errno;
+//			printf("~~~ %s:%i: errno: %i\n", __func__, __LINE__, errno);
+			break;
+		}
+
+//	printf("~~~ here2, nfds: %i\n", nfds);
+		for (int n = 0; n < nfds; ++n) {
+			if (events[n].data.ptr == ctx) {
+				printf("~~~ %s:%i: got work\n", __func__, __LINE__);
+				sap_run(events[n].data.ptr);
+			}
+		}
+	}
+
+	close(epoll_fd);
+	return 0;
+err1:
+	fprintf(stderr, "Error: can't create epoll_fd\n");
+	return -EINVAL;
+}
+
 int main(int argc, char *argv[])
 {
 	int num_payload_dests = get_num_dests(argc, argv, 'd');
@@ -346,7 +393,21 @@ int main(int argc, char *argv[])
 
 	setup_signal_handler(ctx);
 
+//	sap_set_nonblocking(ctx, 1);
+
+/*	for (int i = 0; i < 10000; i++) {
+		printf("~~~ %s:%i: calling: sap_run() (%i)\n", __func__, __LINE__, i);
+		ret = sap_run(ctx);
+		printf("~~~ %s:%i: returning: sap_run() / sleep(3) (%i)\n", __func__, __LINE__, i);
+		sleep(1);
+		if (ret <= 0 && ret != -EAGAIN)
+			break;
+	}*/
+
+
 	sap_run(ctx);
+
+//	my_event_handler(ctx);
 
 	/* alternative to blocking sap_run(), run threaded: */
 //	sap_start(ctx);

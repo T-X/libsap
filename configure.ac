@@ -73,6 +73,28 @@ AS_IF([test "x$with_blake2" != xno],
     ])
   ])
 
+AC_ARG_WITH([uv],
+  [AS_HELP_STRING([--with-uv],
+    [use blake2 for a deterministic SAP Message ID Hash @<:@default=check@:>@])],
+  [],
+  [with_uv=check])
+
+UV=
+AS_IF([test "x$with_uv2" != xno],
+  [AC_CHECK_HEADERS([uv.h],
+    [AC_CHECK_LIB([uv], [uv_default_loop],
+      [AC_SUBST([UV], ["-luv"])
+       AC_DEFINE([HAVE_UV], [1],
+                 [Define if you have UV])
+      ],
+      [if test "x$with_uv" != xcheck; then
+         AC_MSG_FAILURE(
+           [--with-uv was given, but test for uv failed])
+       fi
+      ], )
+    ])
+  ])
+
 AM_INIT_AUTOMAKE([1.11 subdir-objects -Wall -Werror])
 AM_PROG_AR
 LT_INIT

@@ -23,6 +23,7 @@
 #include <threads.h>
 #include <time.h>
 #include <unistd.h>
+#include <uv.h>
 
 #include <arpa/inet.h> // inet_ntop()
 
@@ -47,9 +48,6 @@ struct sap_session_entry {
 	struct timespec last_seen;
 	struct hlist_node node;
 };
-
-#define sap_container_of(ptr, type, member) \
-		((type *)((char *)(ptr) - offsetof(type, member)))
 
 static int sap_send(struct sap_ctx_dest *ctx_dest)
 {
@@ -472,12 +470,14 @@ static int sap_epoll_rx_handler(struct sap_ctx_dest *ctx_dest)
 	if (sap_is_zero_address(&orig_src))
 		goto out;
 
+	printf("~~~ %s:%i: here, got a packet\n", __func__, __LINE__);
 	/* ignore our own packets */
 	if (sap_is_my_source(ctx_dest, &src) &&
 	    sap_is_my_orig_source(ctx_dest, &orig_src) &&
 	    packet->msg_id_hash == my_packet->msg_id_hash)
 		goto out;
 
+	printf("~~~ %s:%i: here, got a packet, not ours\n", __func__, __LINE__);
 	/* assume this is a high-availability SAP announcer on another host,
 	 * for the same payload as ours
 	 */
@@ -601,11 +601,17 @@ static int sap_count_reached(struct sap_ctx *ctx)
 	return ctx->count_max && ctx->count >= ctx->count_max;
 }
 
+static int sap_epoll_term_handler(struct sap_ctx *ctx)
+{
+	uv_stop(ctx->epoll.uv_loop);
+}
+
 static int sap_epoll_tx_handler(struct sap_ctx_dest *ctx_dest)
 {
 	struct sap_ctx *ctx = ctx_dest->ctx;
 	uint64_t res;
 
+	printf("~~~ %s:%i: start\n", __func__, __LINE__);
 	read(ctx_dest->timer_fd, &res, sizeof(res));
 
 	sap_sessions_timeout(ctx_dest);
@@ -627,7 +633,7 @@ static int sap_epoll_tx_handler(struct sap_ctx_dest *ctx_dest)
 	return 0;
 }
 
-static int sap_epoll_event_handler(struct epoll_event *event)
+/*static int sap_epoll_event_handler(struct epoll_event *event)
 {
 	enum sap_epoll_ctx_type *type = event->data.ptr;
 	struct sap_ctx_dest *ctx_dest;
@@ -646,6 +652,48 @@ static int sap_epoll_event_handler(struct epoll_event *event)
 	}
 
 	return -EINVAL;
+}*/
+
+static int sap_poll_event_handler(enum sap_epoll_ctx_type *type)
+{
+	struct sap_ctx_dest *ctx_dest;
+	struct sap_ctx *ctx;
+
+	printf("~~~ %s:%i: start, type: %i\n", __func__, __LINE__, *type);
+	switch (*type) {
+	case SAP_EPOLL_CTX_TYPE_NONE:
+		return 0;
+	case SAP_EPOLL_CTX_TYPE_TERM:
+		ctx = sap_container_of(type, struct sap_ctx,
+				       epoll_ctx_term);
+		sap_epoll_term_handler(ctx);
+		return 0;
+	case SAP_EPOLL_CTX_TYPE_RX:
+		ctx_dest = sap_container_of(type, struct sap_ctx_dest,
+					    epoll_ctx_rx);
+		return sap_epoll_rx_handler(ctx_dest);
+	case SAP_EPOLL_CTX_TYPE_TX:
+	printf("~~~ %s:%i: type tx\n", __func__, __LINE__);
+		ctx_dest = sap_container_of(type, struct sap_ctx_dest,
+					    epoll_ctx_tx);
+		return sap_epoll_tx_handler(ctx_dest);
+	}
+
+	return -EINVAL;
+}
+
+static int sap_epoll_event_handler(struct epoll_event *event)
+{
+//	enum sap_epoll_ctx_type *type = event->data.ptr;
+//	       	= event->data.ptr;
+	return sap_poll_event_handler(event->data.ptr);
+}
+
+void sap_uv_event_handler(uv_poll_t *req, int status, int events)
+{
+	printf("~~~ %s:%i: start, &req/handle: %p, type: %p\n", __func__, __LINE__, req, req->data);
+//	sleep(1);
+	sap_poll_event_handler((enum sap_epoll_ctx_type *)req->data);
 }
 
 static int sap_terminate_dest(struct sap_ctx_dest *ctx_dest)
@@ -667,15 +715,40 @@ static void sap_terminate_all(struct sap_ctx *ctx)
 		sap_terminate_dest(ctx_dest);
 }
 
+static void sap_epoll_wait(struct sap_ctx *ctx, int nonblocking)
+{
+	int ev_count, ret;
+
+	ev_count = epoll_wait(ctx->epoll.epoll_fd, ctx->epoll.events,
+			      SAP_EPOLL_MAX_EVENTS, nonblocking ? -1 : 0);
+
+	for(int i = 0; i < ev_count; i++) {
+		ret = sap_epoll_event_handler(&ctx->epoll.events[i]);
+		if (ret < 0)
+			return;
+	}
+}
+
+static void sap_uv_wait(struct sap_ctx *ctx, int nonblocking)
+{
+	printf("~~~ %s:%i: nonblocking: %i\n", __func__, __LINE__, nonblocking);
+	uv_run(ctx->epoll.uv_loop, nonblocking ? UV_RUN_NOWAIT : UV_RUN_DEFAULT);
+}
+
+static void sap_poll_loop(struct sap_ctx *ctx, int nonblocking)
+{
+	sap_uv_wait(ctx, nonblocking);
+}
+
 int sap_run(struct sap_ctx *ctx)
 {
-	int timeout = 0;
+	int nonblocking = 1;
 	int ret = 0;
 
 	int ev_count;
 
 	if (!ctx->epoll.nonblocking) {
-		timeout = -1;
+		nonblocking = 0;
 		sap_set_timers(ctx);
 	}
 
@@ -687,15 +760,11 @@ int sap_run(struct sap_ctx *ctx)
 	 * TODO: check that we're doing this right
 	 */
 	atomic_thread_fence(memory_order_acquire);
+	printf("~~~ %s:%i: here\n", __func__, __LINE__);
 	while(!ctx->term) {
-		ev_count = epoll_wait(ctx->epoll.epoll_fd, ctx->epoll.events,
-				      SAP_EPOLL_MAX_EVENTS, timeout);
-
-		for(int i = 0; i < ev_count; i++) {
-			ret = sap_epoll_event_handler(&ctx->epoll.events[i]);
-			if (ret < 0)
-				goto out;
-		}
+		printf("~~~ %s:%i: here\n", __func__, __LINE__);
+		sap_poll_loop(ctx, nonblocking);
+		printf("~~~ %s:%i: here\n", __func__, __LINE__);
 
 		/* single-threaded, nonblocking */
 		if (ctx->epoll.nonblocking) {
@@ -738,7 +807,8 @@ void sap_set_nonblocking(struct sap_ctx *ctx, int on)
 
 int sap_get_pollfd(struct sap_ctx *ctx)
 {
-	return ctx->epoll.epoll_fd;
+	return uv_backend_fd(ctx->epoll.uv_loop);
+//	return ctx->epoll.epoll_fd;
 }
 
 static int sap_run_thread(void *arg)
@@ -799,6 +869,7 @@ void sap_term(struct sap_ctx *ctx)
 	 * we don't get reordered with the read/write to the
 	 * signaling pipe-fd
 	 */
+	printf("~~~ %s:%i: writing to pipefd[1]\n", __func__, __LINE__);
 	atomic_thread_fence(memory_order_release);
 	write(ctx->thread.pipefd[1], &(char){'\0'}, sizeof(char));
 }
