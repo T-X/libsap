@@ -14,7 +14,8 @@
 #ifndef HAVE_UV
 	#include <sys/epoll.h>
 #endif
-#include <sys/socket.h>
+//not on windows:
+//#include <sys/socket.h>
 #include <unistd.h>
 
 #include "libsap.h"
@@ -35,7 +36,7 @@ void signal_handler_status(int signum)
 
 void setup_signal_handler(struct sap_ctx *ctx)
 {
-	struct sigaction new_action, old_action;
+/*	struct sigaction new_action, old_action;
 	
 	p_sap_ctx = ctx;
 
@@ -58,7 +59,7 @@ void setup_signal_handler(struct sap_ctx *ctx)
 	new_action.sa_handler = &signal_handler_status;
 	sigaction(SIGUSR1, NULL, &old_action);
 	if (old_action.sa_handler != SIG_IGN)
-		sigaction(SIGUSR1, &new_action, NULL);
+		sigaction(SIGUSR1, &new_action, NULL);*/
 }
 
 static void usage(char *prog)
@@ -273,7 +274,7 @@ static int get_args(int argc,
 			break;
 		case 'h':
 			usage(argv[0]);
-			return -ESHUTDOWN;
+			return -ECANCELED;
 		}
 	}
 
@@ -375,7 +376,7 @@ int main(int argc, char *argv[])
 		       &enable_rand_msg_id_hash, &msg_type, &msg_id_hash,
 		       &orig_src, &interval, &no_jitter, &count, &bw_limit);
 	if (ret < 0) {
-		if (ret == -ESHUTDOWN) {
+		if (ret == -ECANCELED) {
 			ret = 0;
 			goto out;
 		}

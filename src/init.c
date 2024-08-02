@@ -29,6 +29,8 @@
 
 #include "libsap.h"
 #include "libsap_priv.h"
+#include "platform_threads.h"
+#include "platform_timer.h"
 
 #ifdef __STDC_NO_THREADS__
 #error I need threads to build this program!
@@ -72,7 +74,7 @@ static int sap_init_random(struct sap_ctx *sap_ctx)
 {
 	struct random_data *rd = &sap_ctx->rand.rd;
 	pid_t pid = getpid();
-	thrd_t tid = thrd_current();
+	sap_thrd_t tid = sap_thrd_current();
 	struct timespec uptime, time;
 	int ret;
 
@@ -982,10 +984,13 @@ static int sap_init_ctx_dest_add_epoll(struct sap_ctx_dest *ctx_dest)
 		return ret;
 
 	/* wake-up timer for SAP packet transmission */
-	ret = sap_init_add_poll(ctx_dest->timer_fd, ctx_dest->ctx,
+	/* TODO: don't add timer for uv_timer_t */
+#ifndef HAVE_UV
+	ret = sap_init_add_poll(ctx_dest->timer, ctx_dest->ctx,
 				 &ctx_dest->epoll_ctx_tx);
 	if (ret < 0)
 		return ret;
+#endif
 
 	return 0;
 }
@@ -993,7 +998,7 @@ static int sap_init_ctx_dest_add_epoll(struct sap_ctx_dest *ctx_dest)
 static void sap_init_ctx_dest_del_epoll(struct sap_ctx_dest *ctx_dest)
 {
 #ifndef HAVE_UV
-	sap_init_del_epoll(ctx_dest->timer_fd, ctx_dest->ctx);
+	sap_init_del_epoll(ctx_dest->timer, ctx_dest->ctx);
 	sap_init_del_epoll(ctx_dest->sd_rx, ctx_dest->ctx);
 	sap_init_del_epoll(ctx_dest->sd_tx, ctx_dest->ctx);
 #endif
@@ -1022,12 +1027,14 @@ sap_init_ctx_dest(struct sap_ctx *ctx, char *dest, int pay_to_sap_dest,
 	ctx_dest->num_sessions = 0;
 	ctx_dest->num_ha_sessions = 0;
 
-	if (mtx_init(&ctx_dest->sessions_lock, mtx_plain) == thrd_error)
+	if (sap_mtx_init(&ctx_dest->sessions_lock, sap_mtx_plain) != sap_thrd_success)
 		goto err1;
 
 //	ctx_dest->timer_fd = timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK);
-	ctx_dest->timer_fd = timerfd_create(CLOCK_MONOTONIC, O_NONBLOCK);
-	if (ctx_dest->timer_fd < 0)
+//	ctx_dest->timer_fd = timerfd_create(CLOCK_MONOTONIC, O_NONBLOCK);
+//	ctx_dest->timer_fd = sap_timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK);
+	ret = sap_timer_create(ctx, &ctx_dest->timer);
+	if (ret < 0)
 		goto err2;
 
 	ret = sap_create_socket(ctx_dest, dest, pay_to_sap_dest, dest_af,
@@ -1050,9 +1057,10 @@ err5:
 err4:
 	sap_free_socket(ctx_dest);
 err3:
-	close(ctx_dest->timer_fd);
+	//close(ctx_dest->timer_fd);
+	sap_timer_destroy(&ctx_dest->timer);
 err2:
-	mtx_destroy(&ctx_dest->sessions_lock);
+	sap_mtx_destroy(&ctx_dest->sessions_lock);
 err1:
 	free(ctx_dest);
 	return NULL;
@@ -1064,8 +1072,9 @@ static void sap_free_ctx_dest(struct sap_ctx_dest *ctx_dest)
 	sap_init_ctx_dest_del_epoll(ctx_dest);
 	free(ctx_dest->message);
 	sap_free_socket(ctx_dest);
-	close(ctx_dest->timer_fd);
-	mtx_destroy(&ctx_dest->sessions_lock);
+	//close(ctx_dest->timer_fd);
+	sap_timer_destroy(&ctx_dest->timer);
+	sap_mtx_destroy(&ctx_dest->sessions_lock);
 	free(ctx_dest);
 }
 
@@ -1167,7 +1176,7 @@ struct sap_ctx *sap_init_custom(
 	else
 		ctx->bw_limit = (unsigned long)bw_limit;
 
-	if (mtx_init(&ctx->thread.ctrl_lock, mtx_plain) == thrd_error)
+	if (sap_mtx_init(&ctx->thread.ctrl_lock, sap_mtx_plain) != sap_thrd_success)
 		goto err1;
 
 	if (!payload_type)
@@ -1267,7 +1276,7 @@ err4:
 err3:
 	sap_free_epoll(ctx);
 err2:
-	mtx_destroy(&ctx->thread.ctrl_lock);
+	sap_mtx_destroy(&ctx->thread.ctrl_lock);
 err1:
 	free(ctx);
 	return NULL;
@@ -1291,6 +1300,6 @@ void sap_free(struct sap_ctx *ctx)
 {
 	sap_free_ctx_dests(ctx);
 	sap_free_epoll(ctx);
-	mtx_destroy(&ctx->thread.ctrl_lock);
+	sap_mtx_destroy(&ctx->thread.ctrl_lock);
 	free(ctx);
 }

@@ -9,17 +9,20 @@
 #endif
 #include <fcntl.h>
 #include <limits.h>
-#include <netinet/in.h>
+//not on windows:
+//#include <netinet/in.h>
 #include <signal.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stddef.h>
 #include <string.h>
-#include <sys/signalfd.h>
-#include <sys/socket.h>
-#include <sys/timerfd.h>
+//not on windows:
+//#include <sys/signalfd.h>
+//not on windows:
+//#include <sys/socket.h>
+//not on windows:
+//#include <sys/timerfd.h>
 #include <sys/types.h>
-#include <threads.h>
 #include <time.h>
 #include <unistd.h>
 #ifdef HAVE_UV
@@ -28,11 +31,20 @@
 	#include <sys/epoll.h>
 #endif
 
-#include <arpa/inet.h> // inet_ntop()
+#if defined(_WIN32) || defined(WIN32)
+	#include <winsock2.h>
+	#include <ws2tcpip.h>
+#else
+	#include <arpa/inet.h> // inet_ntop()
+	#include <netinet/in.h>
+	#include <sys/socket.h>
+#endif
 
 #include "libsap.h"
 #include "libsap_priv.h"
 #include "times.h"
+#include "platform_threads.h"
+#include "platform_timer.h"
 
 #ifdef __STDC_NO_THREADS__
 #error I need threads to build this program!
@@ -105,7 +117,8 @@ static void sap_set_timer_next(struct sap_ctx_dest *ctx_dest)
 	struct itimerspec timer;
 
 	timer = sap_get_timeout_next(ctx_dest);
-	timerfd_settime(ctx_dest->timer_fd, 0, &timer, NULL);
+	//timerfd_settime(ctx_dest->timer_fd, 0, &timer, NULL);
+	sap_timer_settime(&ctx_dest->timer, &timer);
 }
 
 static void sap_set_timer_now(struct sap_ctx_dest *ctx_dest)
@@ -118,7 +131,8 @@ static void sap_set_timer_now(struct sap_ctx_dest *ctx_dest)
 		}
 	};
 
-	timerfd_settime(ctx_dest->timer_fd, 0, &timer, NULL);
+	//timerfd_settime(ctx_dest->timer_fd, 0, &timer, NULL);
+	sap_timer_settime(&ctx_dest->timer, &timer);
 }
 
 static void sap_set_timers_next(struct sap_ctx *ctx)
@@ -355,12 +369,12 @@ sap_session_get_or_add(struct sap_ctx_dest *ctx_dest,
 		ctx_dest->num_sessions++;
 	}
 
-	mtx_lock(&ctx_dest->sessions_lock);
+	sap_mtx_lock(&ctx_dest->sessions_lock);
 	if (!session)
 		hlist_add_head(&new_session->node, sessions_list);
 	else
 		hlist_add_behind(&new_session->node, &session->node);
-	mtx_unlock(&ctx_dest->sessions_lock);
+	sap_mtx_unlock(&ctx_dest->sessions_lock);
 
 	return new_session;
 }
@@ -389,9 +403,9 @@ static int sap_session_del(struct sap_ctx_dest *ctx_dest,
 
 	ret = 0;
 err:
-	mtx_lock(&ctx_dest->sessions_lock);
+	sap_mtx_lock(&ctx_dest->sessions_lock);
 	hlist_del(&session->node);
-	mtx_unlock(&ctx_dest->sessions_lock);
+	sap_mtx_unlock(&ctx_dest->sessions_lock);
 
 	free(session);
 	return ret;
@@ -612,13 +626,14 @@ static int sap_epoll_term_handler(struct sap_ctx *ctx)
 	return 0;
 }
 
-static int sap_epoll_tx_handler(struct sap_ctx_dest *ctx_dest)
+int sap_epoll_tx_handler(struct sap_ctx_dest *ctx_dest)
 {
 	struct sap_ctx *ctx = ctx_dest->ctx;
-	uint64_t res;
+	//uint64_t res;
 
 	printf("~~~ %s:%i: start\n", __func__, __LINE__);
-	read(ctx_dest->timer_fd, &res, sizeof(res));
+	sap_timer_cooldown(&ctx_dest->timer);
+	//read(ctx_dest->timer_fd, &res, sizeof(res));
 
 	sap_sessions_timeout(ctx_dest);
 
@@ -798,19 +813,30 @@ out:
 	return ret;
 }
 
-void sap_set_nonblocking(struct sap_ctx *ctx, int on)
+static void sap_set_epoll_nonblocking(struct sap_ctx *ctx, int on)
 {
+#ifndef HAVE_UV
 	int fd = ctx->epoll.epoll_fd;
 	int flags = fcntl(fd, F_GETFL, 0);
 
-	if (on) {
+	if (on)
 		fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+	else
+		fcntl(fd, F_SETFL, flags & ~O_NONBLOCK);
+#endif
+}
+
+void sap_set_nonblocking(struct sap_ctx *ctx, int on)
+{
+
+	if (on) {
+		sap_set_epoll_nonblocking(ctx, on);
 		ctx->epoll.nonblocking = 1;
 		sap_set_timers(ctx);
 	} else {
 		/* TODO: unset timers? */
 		ctx->epoll.nonblocking = 0;
-		fcntl(fd, F_SETFL, flags & ~O_NONBLOCK);
+		sap_set_epoll_nonblocking(ctx, on);
 	}
 }
 
@@ -830,17 +856,22 @@ static int sap_run_thread(void *arg)
 	return sap_run(ctx);
 }
 
+static void sap_run_thread_noret(void *arg)
+{
+	sap_run_thread(arg);
+}
+
 int sap_start(struct sap_ctx *ctx)
 {
 	int ret = 0;
-	thrd_t tid;
+	sap_thrd_t tid;
 
 	if (ctx->epoll.nonblocking) {
-		ret = -EBADFD;
+		ret = -EBADF;
 		goto err1;
 	}
 
-	mtx_lock(&ctx->thread.ctrl_lock);
+	sap_mtx_lock(&ctx->thread.ctrl_lock);
 	/* already running */
 	if (ctx->thread.tid)
 		goto err2;
@@ -856,8 +887,8 @@ int sap_start(struct sap_ctx *ctx)
 		goto err2;
 	}
 
-	ret = thrd_create(&tid, sap_run_thread, ctx);
-	if (ret != thrd_success) {
+	ret = sap_thrd_create(&tid, sap_run_thread, sap_run_thread_noret, ctx);
+	if (ret != sap_thrd_success) {
 		ret = -EPERM;
 		goto err3;
 	}
@@ -867,7 +898,7 @@ int sap_start(struct sap_ctx *ctx)
 err3:
 	pthread_sigmask(SIG_UNBLOCK, &mask, NULL);
 err2:
-	mtx_unlock(&ctx->thread.ctrl_lock);
+	sap_mtx_unlock(&ctx->thread.ctrl_lock);
 err1:
 	return ret;
 }
@@ -890,13 +921,13 @@ void sap_stop(struct sap_ctx *ctx)
 {
 	sap_term(ctx);
 
-	mtx_lock(&ctx->thread.ctrl_lock);
+	sap_mtx_lock(&ctx->thread.ctrl_lock);
 	if (ctx->thread.tid) {
-		thrd_join(*ctx->thread.tid, NULL);
+		sap_thrd_join(ctx->thread.tid, NULL);
 		ctx->thread.tid = NULL;
 		ctx->thread.tid_store = 0;
 	}
-	mtx_unlock(&ctx->thread.ctrl_lock);
+	sap_mtx_unlock(&ctx->thread.ctrl_lock);
 }
 
 static void sap_status_dump_own(struct sap_ctx_dest *ctx_dest,
@@ -925,7 +956,7 @@ static void sap_status_dump_other(struct sap_ctx_dest *ctx_dest,
 	struct sap_session_entry *session;
 	struct sap_status_entry entry;
 
-	mtx_lock(&ctx_dest->sessions_lock);
+	sap_mtx_lock(&ctx_dest->sessions_lock);
 	hlist_for_each_entry(session, &ctx_dest->sessions_list, node) {
 		entry.dest = ctx_dest->dest;
 		memset(&entry.src, 0, sizeof(entry.src));
@@ -936,7 +967,7 @@ static void sap_status_dump_other(struct sap_ctx_dest *ctx_dest,
 
 		callback(&entry, cb_data);
 	}
-	mtx_unlock(&ctx_dest->sessions_lock);
+	sap_mtx_unlock(&ctx_dest->sessions_lock);
 }
 
 static void sap_status_dump_ha(struct sap_ctx_dest *ctx_dest,
@@ -947,7 +978,7 @@ static void sap_status_dump_ha(struct sap_ctx_dest *ctx_dest,
 	struct sap_session_entry *session;
 	struct sap_status_entry entry;
 
-	mtx_lock(&ctx_dest->sessions_lock);
+	sap_mtx_lock(&ctx_dest->sessions_lock);
 	hlist_for_each_entry(session, &ctx_dest->ha_sessions_list,
 			     node) {
 		entry.dest = ctx_dest->dest;
@@ -959,7 +990,7 @@ static void sap_status_dump_ha(struct sap_ctx_dest *ctx_dest,
 
 		callback(&entry, cb_data);
 	}
-	mtx_unlock(&ctx_dest->sessions_lock);
+	sap_mtx_unlock(&ctx_dest->sessions_lock);
 }
 
 int sap_status_dump(struct sap_ctx *ctx,
@@ -970,7 +1001,7 @@ int sap_status_dump(struct sap_ctx *ctx,
 	struct sap_ctx_dest *ctx_dest;
 
 	if (ctx->term)
-		return -ESHUTDOWN;
+		return -ECANCELED;
 
 	hlist_for_each_entry(ctx_dest, &ctx->dest_list, node) {
 		sap_status_dump_own(ctx_dest, callback, cb_data);
@@ -1046,7 +1077,7 @@ static int sap_status_dump_json_session(struct sap_ctx_dest *ctx_dest,
 
 	json_object_object_add(dest_obj, session_key, session_obj);
 
-	mtx_lock(&ctx_dest->sessions_lock);
+	sap_mtx_lock(&ctx_dest->sessions_lock);
 	hlist_for_each_entry(session, sessions_list, node) {
 		inet_ntop_46(&session->orig_src, orig_src, sizeof(orig_src));
 		snprintf(msg_id, sizeof(msg_id), "0x%04x",
@@ -1071,7 +1102,7 @@ static int sap_status_dump_json_session(struct sap_ctx_dest *ctx_dest,
 			json_object_object_add(obj, msg_id_key, msg_id_obj);
 		}
 	}
-	mtx_unlock(&ctx_dest->sessions_lock);
+	sap_mtx_unlock(&ctx_dest->sessions_lock);
 
 	return 0;
 }
@@ -1103,7 +1134,7 @@ int sap_status_dump_json(struct sap_ctx *ctx, int fd)
 	int ret = -ENOMEM;
 
 	if (ctx->term)
-		return -ESHUTDOWN;
+		return -ECANCELED;
 
 	fd_dup = dup(fd);
 	if (fd_dup < 0)

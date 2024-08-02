@@ -4,9 +4,15 @@
 #ifndef __LIBSAP_H__
 #define __LIBSAP_H__
 
-#include <netinet/in.h>
 #include <stdint.h>
-#include <sys/socket.h>
+
+#if defined(_WIN32) || defined(WIN32)
+	#include <winsock2.h>
+	#include <ws2tcpip.h>
+#else
+	#include <netinet/in.h>
+	#include <sys/socket.h>
+#endif
 
 enum sap_status_event_type {
 	SAP_STATUS_ADD,

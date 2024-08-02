@@ -4,10 +4,11 @@
 #ifndef __LIBSAP_PRIV_H__
 #define __LIBSAP_PRIV_H__
 
-#include <netinet/in.h>
+//not on windows:
+//#include <netinet/in.h>
 #include <stdlib.h>
-#include <sys/socket.h>
-#include <threads.h>
+//not on windows:
+//#include <sys/socket.h>
 #include <unistd.h>
 #ifdef HAVE_UV
 	#include <uv.h>
@@ -15,8 +16,18 @@
 	#include <sys/epoll.h>
 #endif
 
+#if defined(_WIN32) || defined(WIN32)
+	#include <winsock2.h>
+	#include <ws2tcpip.h>
+#else
+	#include <netinet/in.h>
+	#include <sys/socket.h>
+#endif
+
 #include "list.h"
 #include "libsap.h"
+#include "platform_threads.h"
+#include "platform_timer_t.h"
 
 #define SAP_EPOLL_MAX_EVENTS 32
 
@@ -79,9 +90,9 @@ struct sap_ctx {
 		int nonblocking;
 	} epoll;
 	struct {
-		thrd_t *tid;
-		thrd_t tid_store;
-		mtx_t ctrl_lock;
+		sap_thrd_t *tid;
+		sap_thrd_t tid_store;
+		sap_mtx_t ctrl_lock;
 		int pipefd[2];
 	} thread;
 };
@@ -92,7 +103,8 @@ struct sap_ctx_dest {
 	enum sap_epoll_ctx_type epoll_ctx_rx;
 	int sd_tx;
 	int sd_rx;
-	int timer_fd;
+//	int timer_fd;
+	sap_timer_t timer;
 #ifdef HAVE_UV
 	struct {
 		uv_poll_t poll_handle_tx;
@@ -113,7 +125,7 @@ struct sap_ctx_dest {
 	struct hlist_head sessions_list;
 	struct hlist_head ha_sessions_list;
 	/* protects status dump on (ha_)sessions_list when multi-threaded */
-	mtx_t sessions_lock;
+	sap_mtx_t sessions_lock;
 };
 
 static inline unsigned int sap_ipeth_hdrlen(union sap_sockaddr_union *addr)
@@ -138,6 +150,8 @@ static inline uint16_t sap_get_rand_uint16(struct sap_ctx *ctx)
 }
 
 void sap_sessions_free(struct sap_ctx_dest *ctx_dest);
+
+int sap_epoll_tx_handler(struct sap_ctx_dest *ctx_dest);
 
 #ifdef HAVE_UV
 void sap_uv_event_handler(uv_poll_t *req, int status, int events);
