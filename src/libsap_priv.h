@@ -6,7 +6,7 @@
 
 //not on windows:
 //#include <netinet/in.h>
-#include <stdlib.h>
+//#include <stdlib.h>
 //not on windows:
 //#include <sys/socket.h>
 #include <unistd.h>
@@ -20,6 +20,8 @@
 	#include <winsock2.h>
 	#include <ws2tcpip.h>
 #else
+	#include <arpa/inet.h> // inet_ntop()
+	#include <netdb.h>
 	#include <netinet/in.h>
 	#include <sys/socket.h>
 #endif
@@ -27,7 +29,7 @@
 #include "list.h"
 #include "libsap.h"
 #include "platform_threads.h"
-#include "platform_timer_t.h"
+#include "platform_types.h"
 
 #define SAP_EPOLL_MAX_EVENTS 32
 
@@ -75,7 +77,7 @@ struct sap_ctx {
 	enum sap_epoll_ctx_type epoll_ctx_none;
 	enum sap_epoll_ctx_type epoll_ctx_term;
 	struct {
-		struct random_data rd;
+		sap_random_data rd;
 		char rs[256];
 	} rand;
 	struct {
@@ -140,14 +142,14 @@ static inline unsigned int sap_ipeth_hdrlen(union sap_sockaddr_union *addr)
 	}
 }
 
-static inline uint16_t sap_get_rand_uint16(struct sap_ctx *ctx)
-{
-	int32_t res;
-
-	random_r(&ctx->rand.rd, &res);
-
-	return res % (UINT16_MAX + 1);
-}
+//static inline uint16_t sap_get_rand_uint16(struct sap_ctx *ctx)
+//{
+//	int32_t res;
+//
+//	random_r(&ctx->rand.rd, &res);
+//
+//	return res % (UINT16_MAX + 1);
+//}
 
 void sap_sessions_free(struct sap_ctx_dest *ctx_dest);
 

@@ -6,12 +6,11 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
-#include <netdb.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
-#include <sys/timerfd.h>
+//#include <sys/timerfd.h>
 
 #ifdef HAVE_ZLIB
 	#include <zlib.h>
@@ -25,12 +24,11 @@
 	#include <sys/epoll.h>
 #endif
 
-#include <arpa/inet.h> // inet_ntop()
-
 #include "libsap.h"
 #include "libsap_priv.h"
 #include "platform_threads.h"
 #include "platform_timer.h"
+#include "platform_random.h"
 
 #ifdef __STDC_NO_THREADS__
 #error I need threads to build this program!
@@ -58,66 +56,66 @@
 #define SAP_PAYLOAD_TYPE_SDP "application/sdp"
 #define SAP_BANDWIDTH_LIMIT 4000 /* bits/s */
 
-static int sap_init_random_add_seed(struct random_data *rd, unsigned int seed)
-{
-	int32_t rand = 0;
-	int ret;
+//static int sap_init_random_add_seed(struct random_data *rd, unsigned int seed)
+//{
+//	int32_t rand = 0;
+//	int ret;
+//
+//	ret = random_r(rd, &rand);
+//	if (ret < 0)
+//		return ret;
+//
+//	return srandom_r(seed ^ rand, rd);
+//}
 
-	ret = random_r(rd, &rand);
-	if (ret < 0)
-		return ret;
-
-	return srandom_r(seed ^ rand, rd);
-}
-
-static int sap_init_random(struct sap_ctx *sap_ctx)
-{
-	struct random_data *rd = &sap_ctx->rand.rd;
-	pid_t pid = getpid();
-	sap_thrd_t tid = sap_thrd_current();
-	struct timespec uptime, time;
-	int ret;
-
-	/* We don't need crypto quality random numbers. But we want to:
-	 * a) avoid messing with the global states of (s)rand()/(s)random()
-	 * as we are a library
-	 * b) avoid collisions on embedded systems which often boot
-	 * into the same uptime state and don't have a persistent RTC
-	 * c) be MT safe
-	 */
-
-	memset(rd, 0, sizeof(*rd));
-	ret = initstate_r((unsigned int)pid, sap_ctx->rand.rs,
-			  sizeof(sap_ctx->rand.rs), rd);
-	if (ret < 0)
-		return ret;
-
-	ret = sap_init_random_add_seed(rd, (unsigned int)tid);
-	if (ret < 0)
-		return ret;
-
-	/* uptime */
-	ret = clock_gettime(CLOCK_MONOTONIC, &uptime);
-	if (ret < 0)
-		return ret;
-
-	ret = sap_init_random_add_seed(rd, (unsigned int)uptime.tv_sec);
-	ret |= sap_init_random_add_seed(rd, (unsigned int)uptime.tv_nsec);
-	if (ret < 0)
-		return ret;
-
-	/* system clock */
-	ret = clock_gettime(CLOCK_REALTIME, &time);
-	if (ret < 0)
-		return ret;
-
-	ret = sap_init_random_add_seed(rd, (unsigned int)time.tv_sec);
-	ret |= sap_init_random_add_seed(rd, (unsigned int)time.tv_nsec);
-	if (ret < 0)
-		return ret;
-
-	return 0;
-}
+//static int sap_init_random(struct sap_ctx *sap_ctx)
+//{
+//	struct random_data *rd = &sap_ctx->rand.rd;
+//	pid_t pid = getpid();
+//	sap_thrd_t tid = sap_thrd_current();
+//	struct timespec uptime, time;
+//	int ret;
+//
+//	/* We don't need crypto quality random numbers. But we want to:
+//	 * a) avoid messing with the global states of (s)rand()/(s)random()
+//	 * as we are a library
+//	 * b) avoid collisions on embedded systems which often boot
+//	 * into the same uptime state and don't have a persistent RTC
+//	 * c) be MT safe
+//	 */
+//
+//	memset(rd, 0, sizeof(*rd));
+//	ret = initstate_r((unsigned int)pid, sap_ctx->rand.rs,
+//			  sizeof(sap_ctx->rand.rs), rd);
+//	if (ret < 0)
+//		return ret;
+//
+//	ret = sap_init_random_add_seed(rd, (unsigned int)tid);
+//	if (ret < 0)
+//		return ret;
+//
+//	/* uptime */
+//	ret = clock_gettime(CLOCK_MONOTONIC, &uptime);
+//	if (ret < 0)
+//		return ret;
+//
+//	ret = sap_init_random_add_seed(rd, (unsigned int)uptime.tv_sec);
+//	ret |= sap_init_random_add_seed(rd, (unsigned int)uptime.tv_nsec);
+//	if (ret < 0)
+//		return ret;
+//
+//	/* system clock */
+//	ret = clock_gettime(CLOCK_REALTIME, &time);
+//	if (ret < 0)
+//		return ret;
+//
+//	ret = sap_init_random_add_seed(rd, (unsigned int)time.tv_sec);
+//	ret |= sap_init_random_add_seed(rd, (unsigned int)time.tv_nsec);
+//	if (ret < 0)
+//		return ret;
+//
+//	return 0;
+//}
 
 #ifdef HAVE_UV
 static int sap_init_add_uv(int fd, struct sap_ctx *ctx,

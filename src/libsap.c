@@ -45,6 +45,7 @@
 #include "times.h"
 #include "platform_threads.h"
 #include "platform_timer.h"
+#include "platform_random.h"
 
 #ifdef __STDC_NO_THREADS__
 #error I need threads to build this program!
@@ -876,16 +877,17 @@ int sap_start(struct sap_ctx *ctx)
 	if (ctx->thread.tid)
 		goto err2;
 
-	sigset_t mask, old_mask;
-	sigemptyset(&mask);
-	sigaddset(&mask, SIGINT);
-	sigaddset(&mask, SIGHUP);
-	sigaddset(&mask, SIGTERM);
+	/* TODO: fixup */
+//	sigset_t mask, old_mask;
+//	sigemptyset(&mask);
+//	sigaddset(&mask, SIGINT);
+//	sigaddset(&mask, SIGHUP);
+//	sigaddset(&mask, SIGTERM);
 
-	if (pthread_sigmask(SIG_BLOCK, &mask, &old_mask) == -1) {
-		ret = -EINVAL;
-		goto err2;
-	}
+//	if (pthread_sigmask(SIG_BLOCK, &mask, &old_mask) == -1) {
+//		ret = -EINVAL;
+//		goto err2;
+//	}
 
 	ret = sap_thrd_create(&tid, sap_run_thread, sap_run_thread_noret, ctx);
 	if (ret != sap_thrd_success) {
@@ -896,7 +898,7 @@ int sap_start(struct sap_ctx *ctx)
 	ctx->thread.tid_store = tid;
 	ctx->thread.tid = &ctx->thread.tid_store;
 err3:
-	pthread_sigmask(SIG_UNBLOCK, &mask, NULL);
+//	pthread_sigmask(SIG_UNBLOCK, &mask, NULL);
 err2:
 	sap_mtx_unlock(&ctx->thread.ctrl_lock);
 err1:
