@@ -159,7 +159,8 @@ static int sap_init_add_uv(int fd, struct sap_ctx *ctx,
 //	handle->data = ctx_dest;
 	handle->data = type;
 	printf("~~~ %s:%i: here, &req/handle: %p, &type: %p\n", __func__, __LINE__, handle, type);
-	uv_poll_init(ctx->epoll.uv_loop, handle, fd);
+	uv_poll_init_socket(ctx->epoll.uv_loop, handle, fd);
+	printf("~~~ %s:%i: here, type: %i, handle->type: %i (UV_POLL: %i)\n", __func__, __LINE__, *type, handle->type, UV_POLL);
 	uv_poll_start(handle, UV_READABLE, sap_uv_event_handler);
 	printf("~~~ %s:%i: end\n", __func__, __LINE__);
 	return 0;
@@ -260,6 +261,10 @@ out:
 static int sap_init_uv(struct sap_ctx *ctx)
 {
 	ctx->epoll.uv_loop = uv_default_loop();
+	if (!ctx->epoll.uv_loop)
+		return -ENOMEM;
+
+	return 0;
 }
 #else
 static int sap_init_epoll(struct sap_ctx *ctx)
@@ -283,6 +288,9 @@ static int sap_init_poll(struct sap_ctx *ctx)
 
 static int sap_init_poll_term(struct sap_ctx *ctx)
 {
+#ifdef HAVE_UV
+	return 0;
+#else
 	int ret;
 
 	ret = sap_pipe(ctx->thread.pipefd);
@@ -302,6 +310,7 @@ err:
 	close(ctx->thread.pipefd[0]);
 	close(ctx->thread.pipefd[1]);
 	return ret;
+#endif
 }
 
 static void sap_free_epoll(struct sap_ctx *ctx)
@@ -1177,9 +1186,11 @@ struct sap_ctx *sap_init_custom(
 	else
 		ctx->bw_limit = (unsigned long)bw_limit;
 
+printf("~~~ %s:%i: here\n", __func__, __LINE__);
 	if (sap_mtx_init(&ctx->thread.ctrl_lock, sap_mtx_plain) != sap_thrd_success)
 		goto err1;
 
+printf("~~~ %s:%i: here\n", __func__, __LINE__);
 	if (!payload_type)
 		payload_type = SAP_PAYLOAD_TYPE_SDP;
 
@@ -1189,12 +1200,14 @@ struct sap_ctx *sap_init_custom(
 		goto err2;
 	}
 
+printf("~~~ %s:%i: here\n", __func__, __LINE__);
 	ret = sap_init_poll(ctx);
 	if (ret < 0) {
 		errno = -EPERM;
 		goto err2;
 	}
 
+printf("~~~ %s:%i: here\n", __func__, __LINE__);
 	ret = sap_init_poll_term(ctx);
 	if (ret < 0) {
 		errno = -EPERM;
@@ -1209,6 +1222,7 @@ struct sap_ctx *sap_init_custom(
 		goto err3;
 	}
 
+printf("~~~ %s:%i: here\n", __func__, __LINE__);
 	if (!disable_dests_from_sdp &&
 	    !strcmp(payload_type, SAP_PAYLOAD_TYPE_SDP)) {
 		sdp_dests = sap_get_payload_dests(payload, &sdp_dests_store);
@@ -1216,6 +1230,7 @@ struct sap_ctx *sap_init_custom(
 			goto err4;
 	}
 
+printf("~~~ %s:%i: here\n", __func__, __LINE__);
 	if (enable_compression >= 0) {
 		ret = sap_compress_payload(&payload, &payload_len,
 					   payload_type);

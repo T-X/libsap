@@ -917,7 +917,11 @@ void sap_term(struct sap_ctx *ctx)
 	 */
 	printf("~~~ %s:%i: writing to pipefd[1]\n", __func__, __LINE__);
 	atomic_thread_fence(memory_order_release);
+#ifdef HAVE_UV
+	uv_stop(ctx->epoll.uv_loop);
+#else
 	write(ctx->thread.pipefd[1], &(char){'\0'}, sizeof(char));
+#endif
 }
 
 void sap_stop(struct sap_ctx *ctx)
