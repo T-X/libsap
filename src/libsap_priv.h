@@ -30,6 +30,7 @@
 #include "libsap.h"
 #include "platform_threads.h"
 #include "platform_types.h"
+#include "platform_pipe.h"
 
 #define SAP_EPOLL_MAX_EVENTS 32
 
@@ -95,7 +96,7 @@ struct sap_ctx {
 		sap_thrd_t *tid;
 		sap_thrd_t tid_store;
 		sap_mtx_t ctrl_lock;
-		int pipefd[2];
+		sap_fd pipefd[2];
 	} thread;
 };
 

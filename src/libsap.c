@@ -46,6 +46,7 @@
 #include "platform_threads.h"
 #include "platform_timer.h"
 #include "platform_random.h"
+#include "platform_pipe.h"
 
 #ifdef __STDC_NO_THREADS__
 #error I need threads to build this program!

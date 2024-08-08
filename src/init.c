@@ -29,6 +29,7 @@
 #include "platform_threads.h"
 #include "platform_timer.h"
 #include "platform_random.h"
+#include "platform_pipe.h"
 
 #ifdef __STDC_NO_THREADS__
 #error I need threads to build this program!
@@ -41,16 +42,16 @@
 	 == htonl (0xfe800000))
 #endif /* __GNUC__ */
 
-#define IN_MC_LINK_LOCAL(a) ((((in_addr_t)(a)) & 0xffffff00) == 0xe0000000)
-#define IN_MC_LOCAL(a) ((((in_addr_t)(a)) & 0xffff0000) == 0xefff0000)
-#define IN_MC_ORG_LOCAL(a) ((((in_addr_t)(a)) & 0xfffc0000) == 0xefc00000)
-#define IN_MC_ADMIN(a) ((((in_addr_t)(a)) & 0xff000000) == 0xef000000)
+#define IN_MC_LINK_LOCAL(a) (((a) & 0xffffff00) == 0xe0000000)
+#define IN_MC_LOCAL(a) (((a) & 0xffff0000) == 0xefff0000)
+#define IN_MC_ORG_LOCAL(a) (((a) & 0xfffc0000) == 0xefc00000)
+#define IN_MC_ADMIN(a) (((a) & 0xff000000) == 0xef000000)
 #define IN_MC_GLOBAL(a) (IN_MULTICAST(a) && !IN_MC_ADMIN(a) && !IN_MC_LINK_LOCAL(a))
 
-#define IN_MC_SAP_LINK_LOCAL ((in_addr_t) 0xe00000ff)
-#define IN_MC_SAP_LOCAL ((in_addr_t) 0xefffffff)
-#define IN_MC_SAP_ORG_LOCAL ((in_addr_t) 0xefc3ffff)
-#define IN_MC_SAP_GLOBAL ((in_addr_t) 0xe0027ffe)
+#define IN_MC_SAP_LINK_LOCAL ((uint32_t) 0xe00000ff)
+#define IN_MC_SAP_LOCAL ((uint32_t) 0xefffffff)
+#define IN_MC_SAP_ORG_LOCAL ((uint32_t) 0xefc3ffff)
+#define IN_MC_SAP_GLOBAL ((uint32_t) 0xe0027ffe)
 
 #define SAP_PORT 9875
 #define SAP_PAYLOAD_TYPE_SDP "application/sdp"
@@ -284,7 +285,7 @@ static int sap_init_poll_term(struct sap_ctx *ctx)
 {
 	int ret;
 
-	ret = pipe(ctx->thread.pipefd);
+	ret = sap_pipe(ctx->thread.pipefd);
 	if (ret < 0)
 		return ret;
 
@@ -541,7 +542,8 @@ static int sap_get_ip4_dst(const struct sockaddr_in *pay_dst,
 			   struct sockaddr_in *sap_dst,
 			   int pay_to_sap_dest)
 {
-	in_addr_t pdst = ntohl(pay_dst->sin_addr.s_addr);
+	//in_addr_t pdst = ntohl(pay_dst->sin_addr.s_addr);
+	uint32_t pdst = ntohl(pay_dst->sin_addr.s_addr);
 	struct in_addr dst;
 
 	/* TODOs/open questions:
@@ -640,7 +642,7 @@ static int sap_get_ip_dst(union sap_sockaddr_union *addr,
 static int sap_set_hop_limit(int sd, union sap_sockaddr_union *sap_dst)
 {
 	int hops = 255;
-	in_addr_t dst;
+	uint32_t dst;
 
 	switch (sap_dst->s.sa_family) {
 	case AF_INET:
