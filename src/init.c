@@ -651,11 +651,11 @@ static int sap_set_hop_limit(int sd, union sap_sockaddr_union *sap_dst)
 		if (IN_MC_LINK_LOCAL(dst))
 			return 0;
 
-		return setsockopt(sd, IPPROTO_IP, IP_MULTICAST_TTL, &hops,
+		return setsockopt(sd, IPPROTO_IP, IP_MULTICAST_TTL, (char *)&hops,
 				  sizeof(hops));
 	case AF_INET6:
 		/* TODO: hop_limit to 1 for link-local scope? */
-		return setsockopt(sd, IPPROTO_IPV6, IPV6_MULTICAST_HOPS, &hops,
+		return setsockopt(sd, IPPROTO_IPV6, IPV6_MULTICAST_HOPS, (char *)&hops,
 				  sizeof(hops));
 	}
 
@@ -664,13 +664,14 @@ static int sap_set_hop_limit(int sd, union sap_sockaddr_union *sap_dst)
 
 static int sap_join_dest4(struct sap_ctx_dest *ctx_dest)
 {
-	struct ip_mreqn mreq = {
+	struct ip_mreq mreq = {
 		.imr_multiaddr = ctx_dest->dest.in.sin_addr,
-		.imr_address = ctx_dest->src.in.sin_addr,
-		.imr_ifindex = 0,
+		.imr_interface = ctx_dest->src.in.sin_addr,
+//		.imr_address = ctx_dest->src.in.sin_addr,
+//		.imr_ifindex = 0,
 	};
 
-	return setsockopt(ctx_dest->sd_rx, IPPROTO_IP, IP_ADD_MEMBERSHIP, &mreq,
+	return setsockopt(ctx_dest->sd_rx, IPPROTO_IP, IP_ADD_MEMBERSHIP, (char *)&mreq,
 			  sizeof(mreq));
 }
 
@@ -681,7 +682,7 @@ static int sap_join_dest6(struct sap_ctx_dest *ctx_dest)
 		.ipv6mr_interface = ctx_dest->dest.in6.sin6_scope_id,
 	};
 
-	return setsockopt(ctx_dest->sd_rx, IPPROTO_IPV6, IPV6_JOIN_GROUP, &mreq,
+	return setsockopt(ctx_dest->sd_rx, IPPROTO_IPV6, IPV6_JOIN_GROUP, (char *)&mreq,
 			  sizeof(mreq));
 }
 
@@ -756,7 +757,7 @@ static int sap_create_socket_rx(struct sap_ctx_dest *ctx_dest)
 	if (sd < 0)
 		return sd;
 
-	ret = setsockopt(sd, SOL_SOCKET, SO_REUSEADDR, &(int){1}, sizeof(int));
+	ret = setsockopt(sd, SOL_SOCKET, SO_REUSEADDR, (char *)&(int){1}, sizeof(int));
 	if (ret < 0)
 		goto err;
 
