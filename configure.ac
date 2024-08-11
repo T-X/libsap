@@ -73,14 +73,31 @@ AS_IF([test "x$with_blake2" != xno],
     ])
   ])
 
+# For ${host_os}:
+AC_CANONICAL_HOST
+
+# On Linux default to --with-uv=no, the code was written to work without it
+# there. Why allowing to build without libuv on Linux in the firt place?
+# libuv is typically not used/installed on embedded Linux devices like with
+# OpenWrt and flash space is often very limited there.
+echo "Host OS: ${host_os}"
+case "${host_os}" in
+  linux*)
+	with_uv_default=no
+	;;
+  *)
+	with_uv_default=check
+	;;
+esac
+
 AC_ARG_WITH([uv],
   [AS_HELP_STRING([--with-uv],
     [use libuv for a portable build @<:@default=check@:>@])],
   [],
-  [with_uv=check])
+  [with_uv=${with_uv_default}])
 
 UV=
-AS_IF([test "x$with_uv" != xno],
+AS_IF([test "x$with_uv" != xno ],
   [AC_CHECK_HEADERS([uv.h],
     [AC_CHECK_LIB([uv], [uv_default_loop],
       # no-strict-aliasing with libuv, like its docs recommends
