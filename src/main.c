@@ -34,32 +34,60 @@ void signal_handler_status(int signum)
 	sap_status_dump_json(p_sap_ctx, STDOUT_FILENO);
 }
 
-void setup_signal_handler(struct sap_ctx *ctx)
+void setup_signals_handler(struct sap_ctx *ctx,
+			   int signals[],
+			   void (*signal_handler)(int signum))
 {
-/*	struct sigaction new_action, old_action;
-	
-	p_sap_ctx = ctx;
+	/**
+	 * Unix world (at least according to "man 2 signal")
+	 * recommends sigaction() instead of signal().
+	 * However Windows only supports signal().
+	 */
+#if defined(_WIN32) || defined(WIN32)
+	for (int *sig = signals; *sig > 0; sig += sizeof(*sig)) {
+		signal(*sig, signal_handler);
+	}
+#else
+	struct sigaction new_action, old_action;
 
-	new_action.sa_handler = &signal_handler_shutdown;
+	new_action.sa_handler = signal_handler;
 	sigemptyset(&new_action.sa_mask);
 	new_action.sa_flags = 0;
 
-	sigaction(SIGINT, NULL, &old_action);
-	if (old_action.sa_handler != SIG_IGN)
-		sigaction(SIGINT, &new_action, NULL);
+	for (int *sig = signals; *sig > 0; sig += sizeof(*sig)) {
+		sigaction(*sig, NULL, &old_action);
+		if (old_action.sa_handler != SIG_IGN)
+			sigaction(*sig, &new_action, NULL);
+	}
+#endif
+}
 
-	sigaction(SIGHUP, NULL, &old_action);
-	if (old_action.sa_handler != SIG_IGN)
-		sigaction(SIGHUP, &new_action, NULL);
+static void setup_signal_handlers(struct sap_ctx *ctx)
+{
+#if defined(_WIN32) && defined(WIN32)
+	/**
+	 * In tests with wine on Linux/Debian only SIGINT worked, but
+	 * not SIGTERM. TODO: Verify SIGTERM on native Windows.
+	 * Also: Not a big issue if it does not work, we mainly
+	 * do this for a clean shutdown, to more easily check
+	 * for memory leaks with Valgrind etc.
+	 */
+	int shutdown_signals[] = { SIGINT, SIGTERM, 0 };
+	/**
+	 * On Windows there is no SIGUSR1, this article
+	 * recommends using "SendMessage-WM_APP":
+	 * https://learn.microsoft.com/en-us/previous-versions/ms811896(v=msdn.10)#signals-and-signal-handling
+	 */
+	int status_signals[] = { 0 };
+#else
+	int shutdown_signals[] = { SIGINT, SIGTERM, SIGHUP, 0 };
+	int status_signals[] = { SIGUSR1, 0 };
+#endif
 
-	sigaction(SIGTERM, NULL, &old_action);
-	if (old_action.sa_handler != SIG_IGN)
-		sigaction(SIGTERM, &new_action, NULL);
+	p_sap_ctx = ctx;
 
-	new_action.sa_handler = &signal_handler_status;
-	sigaction(SIGUSR1, NULL, &old_action);
-	if (old_action.sa_handler != SIG_IGN)
-		sigaction(SIGUSR1, &new_action, NULL);*/
+	setup_signals_handler(ctx, shutdown_signals, &signal_handler_shutdown);
+	setup_signals_handler(ctx, status_signals, &signal_handler_status);
 }
 
 static void usage(char *prog)
@@ -396,7 +424,7 @@ int main(int argc, char *argv[])
 		goto out;
 	}
 
-	setup_signal_handler(ctx);
+	setup_signal_handlers(ctx);
 
 //	sap_set_nonblocking(ctx, 1);
 
