@@ -7,6 +7,7 @@
 #ifdef HAVE_JSON_C
 	#include <json-c/json.h>
 #endif
+#include <fcntl.h>
 #include <limits.h>
 #include <netinet/in.h>
 #include <signal.h>
@@ -133,6 +134,21 @@ static void sap_set_timers_now(struct sap_ctx *ctx)
 
 	hlist_for_each_entry(ctx_dest, &ctx->dest_list, node)
 		sap_set_timer_now(ctx_dest);
+}
+
+static void sap_set_timers(struct sap_ctx *ctx)
+{
+	/* for standard RFC2974 operation, we should not send immediately,
+	 * but instead wait and listen first (see section 3.1.1)
+	 */
+	if (ctx->msg_type == -1)
+		sap_set_timers_next(ctx);
+	else
+	/* when msg_type is set explicitly then we assume the user is
+	 * using this for debugging and needs more immediate
+	 * responsiveness, like a ping utility
+	 */
+		sap_set_timers_now(ctx);
 }
 
 static void sap_set_msg_type(struct sap_ctx_dest *ctx_dest, int msg_type)
@@ -653,21 +669,15 @@ static void sap_terminate_all(struct sap_ctx *ctx)
 
 int sap_run(struct sap_ctx *ctx)
 {
-	int ret;
+	int timeout = 0;
+	int ret = 0;
 
 	int ev_count;
 
-	/* for standard RFC2974 operation, we should not send immediately,
-	 * but instead wait and listen first (see section 3.1.1)
-	 */
-	if (ctx->msg_type == -1)
-		sap_set_timers_next(ctx);
-	else
-	/* when msg_type is set explicitly then we assume the user is
-	 * using this for debugging and needs more immediate
-	 * responsiveness, like a ping utility
-	 */
-		sap_set_timers_now(ctx);
+	if (!ctx->epoll.nonblocking) {
+		timeout = -1;
+		sap_set_timers(ctx);
+	}
 
 	/* memory barrier:
 	 * reading/writing from/to ctx->term can happen through
@@ -679,12 +689,18 @@ int sap_run(struct sap_ctx *ctx)
 	atomic_thread_fence(memory_order_acquire);
 	while(!ctx->term) {
 		ev_count = epoll_wait(ctx->epoll.epoll_fd, ctx->epoll.events,
-				      SAP_EPOLL_MAX_EVENTS, -1);
+				      SAP_EPOLL_MAX_EVENTS, timeout);
 
 		for(int i = 0; i < ev_count; i++) {
 			ret = sap_epoll_event_handler(&ctx->epoll.events[i]);
 			if (ret < 0)
 				goto out;
+		}
+
+		/* single-threaded, nonblocking */
+		if (ctx->epoll.nonblocking) {
+			ret = ctx->term ? 0 : -EAGAIN;
+			goto out;
 		}
 
 		/* for ctx->term, see above */
@@ -698,10 +714,31 @@ int sap_run(struct sap_ctx *ctx)
 	if (ctx->msg_type < 0)
 		sap_terminate_all(ctx);
 
+	ctx->term = 0;
 	ret = 0;
 out:
-	ctx->term = 0;
 	return ret;
+}
+
+void sap_set_nonblocking(struct sap_ctx *ctx, int on)
+{
+	int fd = ctx->epoll.epoll_fd;
+	int flags = fcntl(fd, F_GETFL, 0);
+
+	if (on) {
+		fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+		ctx->epoll.nonblocking = 1;
+		sap_set_timers(ctx);
+	} else {
+		/* TODO: unset timers? */
+		ctx->epoll.nonblocking = 0;
+		fcntl(fd, F_SETFL, flags & ~O_NONBLOCK);
+	}
+}
+
+int sap_get_pollfd(struct sap_ctx *ctx)
+{
+	return ctx->epoll.epoll_fd;
 }
 
 static int sap_run_thread(void *arg)
@@ -716,10 +753,15 @@ int sap_start(struct sap_ctx *ctx)
 	int ret = 0;
 	thrd_t tid;
 
+	if (ctx->epoll.nonblocking) {
+		ret = -EBADFD;
+		goto err1;
+	}
+
 	mtx_lock(&ctx->thread.ctrl_lock);
 	/* already running */
 	if (ctx->thread.tid)
-		goto err1;
+		goto err2;
 
 	sigset_t mask, old_mask;
 	sigemptyset(&mask);
@@ -729,21 +771,22 @@ int sap_start(struct sap_ctx *ctx)
 
 	if (pthread_sigmask(SIG_BLOCK, &mask, &old_mask) == -1) {
 		ret = -EINVAL;
-		goto err1;
+		goto err2;
 	}
 
 	ret = thrd_create(&tid, sap_run_thread, ctx);
 	if (ret != thrd_success) {
 		ret = -EPERM;
-		goto err2;
+		goto err3;
 	}
 
 	ctx->thread.tid_store = tid;
 	ctx->thread.tid = &ctx->thread.tid_store;
-err2:
+err3:
 	pthread_sigmask(SIG_UNBLOCK, &mask, NULL);
-err1:
+err2:
 	mtx_unlock(&ctx->thread.ctrl_lock);
+err1:
 	return ret;
 }
 
